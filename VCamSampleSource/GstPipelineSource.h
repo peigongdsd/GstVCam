@@ -38,8 +38,10 @@ private:
 
 private:
 	std::atomic<bool> _running = false;
+	// Protects start/stop transitions and ownership of GStreamer objects.
 	std::mutex _stateLock;
 	std::thread _pullThread;
+	// Protects _latestSample/_hasFrame shared between pull and MF request threads.
 	std::mutex _frameLock;
 	GstSample* _latestSample = nullptr;
 	bool _hasFrame = false;

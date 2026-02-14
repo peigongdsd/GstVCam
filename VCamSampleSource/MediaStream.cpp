@@ -51,6 +51,7 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index, const VCamPip
 
 HRESULT MediaStream::Start(IMFMediaType* type)
 {
+	// Serialize lifecycle transitions with RequestSample and Stop/Shutdown.
 	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_allocator);
 	if (_state == MF_STREAM_STATE_RUNNING)
@@ -90,6 +91,7 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 
 HRESULT MediaStream::Stop()
 {
+	// Stop can race with frame requests when clients switch cameras.
 	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_allocator);
 	if (_state == MF_STREAM_STATE_STOPPED)
@@ -126,6 +128,7 @@ HRESULT MediaStream::SetD3DManager(IUnknown* manager)
 
 void MediaStream::Shutdown()
 {
+	// Hold the same lock used by request/start/stop so teardown is ordered.
 	winrt::slim_lock_guard lock(_lock);
 	_pipelineSource.Stop();
 
@@ -214,14 +217,23 @@ STDMETHODIMP MediaStream::GetStreamDescriptor(IMFStreamDescriptor** ppStreamDesc
 STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 {
 	//WINTRACE(L"MediaStream::RequestSample pToken:%p", pToken);
-	winrt::slim_lock_guard lock(_lock);
-	RETURN_HR_IF(MF_E_SHUTDOWN, !_allocator || !_queue);
-	RETURN_HR_IF(MF_E_INVALIDREQUEST, _state != MF_STREAM_STATE_RUNNING);
+	wil::com_ptr_nothrow<IMFVideoSampleAllocatorEx> allocator;
+	wil::com_ptr_nothrow<IMFMediaEventQueue> queue;
+	LONGLONG frameDuration = 0;
+	{
+		// Snapshot mutable state, then release the stream lock for heavy per-frame work.
+		winrt::slim_lock_guard lock(_lock);
+		RETURN_HR_IF(MF_E_SHUTDOWN, !_allocator || !_queue);
+		RETURN_HR_IF(MF_E_INVALIDREQUEST, _state != MF_STREAM_STATE_RUNNING);
+		allocator = _allocator;
+		queue = _queue;
+		frameDuration = _frameDuration;
+	}
 
 	wil::com_ptr_nothrow<IMFSample> sample;
-	RETURN_IF_FAILED(_allocator->AllocateSample(&sample));
+	RETURN_IF_FAILED(allocator->AllocateSample(&sample));
 	RETURN_IF_FAILED(sample->SetSampleTime(MFGetSystemTime()));
-	RETURN_IF_FAILED(sample->SetSampleDuration(_frameDuration));
+	RETURN_IF_FAILED(sample->SetSampleDuration(frameDuration));
 
 	wil::com_ptr_nothrow<IMFMediaBuffer> mediaBuffer;
 	RETURN_IF_FAILED(sample->GetBufferByIndex(0, &mediaBuffer));
@@ -236,23 +248,27 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	const auto copyHr = _pipelineSource.CopyLatestFrameTo(scanline, pitch, length);
 	buffer2D->Unlock2D();
 	RETURN_IF_FAILED(copyHr);
-	_requestCount++;
-	const auto now = GetTickCount64();
-	if (_requestCount == 1 || now - _lastRequestTraceTick >= 2000)
-	{
-		_lastRequestTraceTick = now;
-		WINTRACE(
-			L"MediaStream::RequestSample count:%u pitch:%ld length:%u",
-			_requestCount,
-			pitch,
-			length);
-	}
 
 	if (pToken)
 	{
 		RETURN_IF_FAILED(sample->SetUnknown(MFSampleExtension_Token, pToken));
 	}
-	RETURN_IF_FAILED(_queue->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, sample.get()));
+	RETURN_IF_FAILED(queue->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, sample.get()));
+
+	{
+		winrt::slim_lock_guard lock(_lock);
+		_requestCount++;
+		const auto now = GetTickCount64();
+		if (_requestCount == 1 || now - _lastRequestTraceTick >= 2000)
+		{
+			_lastRequestTraceTick = now;
+			WINTRACE(
+				L"MediaStream::RequestSample count:%u pitch:%ld length:%u",
+				_requestCount,
+				pitch,
+				length);
+		}
+	}
 	return S_OK;
 }
 

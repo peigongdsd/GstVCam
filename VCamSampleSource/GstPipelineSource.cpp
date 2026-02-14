@@ -69,7 +69,7 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 	std::lock_guard<std::mutex> lock(_stateLock);
 	RETURN_HR_IF(E_INVALIDARG, !config.width || !config.height || !config.fpsNumerator || !config.fpsDenominator);
 	RETURN_IF_FAILED(EnsureGStreamerInitialized());
-	if (_running)
+	if (_running.load())
 	{
 		return S_OK;
 	}
@@ -83,6 +83,7 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 	{
 		_config.pipeline += L" ! appsink name=vcamsink";
 	}
+
 	WINTRACE(
 		L"GstPipelineSource::Start width:%u height:%u fps:%u/%u pipeline:%s",
 		_config.width,
@@ -93,23 +94,24 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 
 	auto pipelineA = to_string(_config.pipeline);
 	GError* parseError = nullptr;
-	_pipeline = gst_parse_launch(pipelineA.c_str(), &parseError);
+	GstElement* pipeline = gst_parse_launch(pipelineA.c_str(), &parseError);
 	if (parseError)
 	{
 		WINTRACE(L"GStreamer parse warning/error detail: %s", to_wstring(parseError->message).c_str());
 		g_clear_error(&parseError);
 	}
-	if (!_pipeline)
+	RETURN_HR_IF_NULL_MSG(E_INVALIDARG, pipeline, "Invalid GStreamer pipeline");
+
+	GstElement* appSinkElement = gst_bin_get_by_name(GST_BIN(pipeline), "vcamsink");
+	if (!appSinkElement)
 	{
-		RETURN_HR_MSG(E_INVALIDARG, "Invalid GStreamer pipeline");
+		gst_object_unref(pipeline);
+		RETURN_HR_MSG(E_FAIL, "Pipeline must expose an appsink named 'vcamsink'");
 	}
 
-	_appSinkElement = gst_bin_get_by_name(GST_BIN(_pipeline), "vcamsink");
-	RETURN_HR_IF_NULL_MSG(E_FAIL, _appSinkElement, "Pipeline must expose an appsink named 'vcamsink'");
-	_appSink = GST_APP_SINK(_appSinkElement);
-
+	auto appSink = GST_APP_SINK(appSinkElement);
 	g_object_set(
-		G_OBJECT(_appSinkElement),
+		G_OBJECT(appSinkElement),
 		"emit-signals", FALSE,
 		"sync", FALSE,
 		"max-buffers", 2u,
@@ -123,28 +125,44 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 		"height", G_TYPE_INT, static_cast<int>(_config.height),
 		"framerate", GST_TYPE_FRACTION, static_cast<int>(_config.fpsNumerator), static_cast<int>(_config.fpsDenominator),
 		nullptr);
-	gst_app_sink_set_caps(_appSink, caps);
-	gst_caps_unref(caps);
+	if (caps)
+	{
+		gst_app_sink_set_caps(appSink, caps);
+		gst_caps_unref(caps);
+	}
 
-	_bus = gst_element_get_bus(_pipeline);
+	GstBus* bus = gst_element_get_bus(pipeline);
+	if (!bus)
+	{
+		gst_object_unref(appSinkElement);
+		gst_object_unref(pipeline);
+		RETURN_HR(E_FAIL);
+	}
+
+	_pipeline = pipeline;
+	_appSinkElement = appSinkElement;
+	_appSink = appSink;
+	_bus = bus;
 	WINTRACE(L"GstPipelineSource::Start bus:%p appsink:%p", _bus, _appSinkElement);
 
+	{
+		// Keep only the latest sample to minimize latency while clients switch rapidly.
+		std::lock_guard<std::mutex> frameLock(_frameLock);
+		if (_latestSample)
 		{
-			std::lock_guard<std::mutex> frameLock(_frameLock);
-			if (_latestSample)
-			{
-				gst_sample_unref(_latestSample);
-				_latestSample = nullptr;
-			}
-			_hasFrame = false;
-			_formatMismatchLogged.store(false);
-			_firstFrameLogged.store(false);
-			_firstCopyLogged.store(false);
+			gst_sample_unref(_latestSample);
+			_latestSample = nullptr;
 		}
-		_lastNoSampleLogTick.store(GetTickCount64());
-		_lastFallbackLogTick.store(GetTickCount64());
+		_hasFrame = false;
+		_formatMismatchLogged.store(false);
+		_firstFrameLogged.store(false);
+		_firstCopyLogged.store(false);
+	}
 
-	_running = true;
+	const auto now = GetTickCount64();
+	_lastNoSampleLogTick.store(now);
+	_lastFallbackLogTick.store(now);
+	_running.store(true);
 	_pullThread = std::thread(&GstPipelineSource::PullLoop, this);
 	WINTRACE(L"GStreamer pipeline started");
 	return S_OK;
@@ -158,7 +176,7 @@ void GstPipelineSource::Stop()
 		return;
 	}
 
-	_running = false;
+	_running.store(false);
 	if (_pipeline)
 	{
 		const auto stateResult = gst_element_set_state(_pipeline, GST_STATE_NULL);
@@ -234,7 +252,6 @@ void GstPipelineSource::PullLoop()
 	while (_running.load())
 	{
 		DrainBusMessages();
-
 		if (!_appSink)
 		{
 			Sleep(10);
@@ -242,24 +259,23 @@ void GstPipelineSource::PullLoop()
 		}
 
 		GstSample* sample = gst_app_sink_try_pull_sample(_appSink, 200 * GST_MSECOND);
-			if (!sample)
+		if (!sample)
+		{
+			const auto now = GetTickCount64();
+			if (now - _lastNoSampleLogTick.load() >= kNoSampleLogIntervalMs)
 			{
-				const auto now = GetTickCount64();
-				if (now - _lastNoSampleLogTick.load() >= kNoSampleLogIntervalMs)
-				{
-					_lastNoSampleLogTick.store(now);
-					WINTRACE(L"No sample pulled from appsink for %llu ms", kNoSampleLogIntervalMs);
-				}
-				continue;
+				_lastNoSampleLogTick.store(now);
+				WINTRACE(L"No sample pulled from appsink for %llu ms", kNoSampleLogIntervalMs);
 			}
-			_lastNoSampleLogTick.store(GetTickCount64());
+			continue;
+		}
 
-			const auto hr = StoreSample(sample);
-			if (FAILED(hr) && !_formatMismatchLogged.exchange(true))
-			{
-				WINTRACE(L"Could not consume sample from appsink, hr:0x%08X", hr);
-			}
-
+		_lastNoSampleLogTick.store(GetTickCount64());
+		const auto hr = StoreSample(sample);
+		if (FAILED(hr) && !_formatMismatchLogged.exchange(true))
+		{
+			WINTRACE(L"Could not consume sample from appsink, hr:0x%08X", hr);
+		}
 		gst_sample_unref(sample);
 	}
 
@@ -335,14 +351,6 @@ HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destination
 
 	GstSample* sample = nullptr;
 	bool hasFrame = false;
-	HRESULT hr = S_OK;
-	bool frameMapped = false;
-	GstVideoFrame frame{};
-	const BYTE* ySrc = nullptr;
-	const BYTE* uvSrc = nullptr;
-	int yStride = 0;
-	int uvStride = 0;
-	BYTE* uvDst = nullptr;
 	{
 		std::lock_guard<std::mutex> lock(_frameLock);
 		hasFrame = _hasFrame;
@@ -352,15 +360,15 @@ HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destination
 		}
 	}
 
-		if (!sample)
+	if (!sample)
+	{
+		const auto now = GetTickCount64();
+		if (now - _lastFallbackLogTick.load() >= kFallbackLogIntervalMs)
 		{
-			const auto now = GetTickCount64();
-			if (now - _lastFallbackLogTick.load() >= kFallbackLogIntervalMs)
-			{
-				_lastFallbackLogTick.store(now);
-				WINTRACE(
-					L"Using fallback black frame hasFrame:%u sample:%p stride:%ld length:%u",
-					hasFrame ? 1 : 0,
+			_lastFallbackLogTick.store(now);
+			WINTRACE(
+				L"Using fallback black frame hasFrame:%u sample:%p stride:%ld length:%u",
+				hasFrame ? 1 : 0,
 				sample,
 				destinationStride,
 				destinationLength);
@@ -379,11 +387,20 @@ HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destination
 		}
 		return S_OK;
 	}
+
 	if (!_firstCopyLogged.exchange(true))
 	{
 		WINTRACE(L"First frame copy to MF buffer stride:%ld length:%u", destinationStride, destinationLength);
 	}
 
+	HRESULT hr = S_OK;
+	bool frameMapped = false;
+	GstVideoFrame frame{};
+	const BYTE* ySrc = nullptr;
+	const BYTE* uvSrc = nullptr;
+	int yStride = 0;
+	int uvStride = 0;
+	BYTE* uvDst = nullptr;
 	GstCaps* caps = gst_sample_get_caps(sample);
 	GstBuffer* buffer = gst_sample_get_buffer(sample);
 	if (!caps || !buffer)

@@ -1,11 +1,10 @@
-# GstVCam (VCamSample)
+# GstVCam
 
 Windows 11 Media Foundation virtual camera backed by a GStreamer pipeline (`NV12 -> appsink`).
 
 ## What It Is
 
-- `VCamSampleSource` (DLL): the actual Media Foundation virtual camera source loaded by Windows Frame Server.
-- `VCamSample` (EXE): optional helper/launcher (thin).
+- `VCamSampleSource` (DLL): the Media Foundation virtual camera source loaded by Windows Frame Server.
 
 At runtime, the source reads pipeline settings from registry and pushes frames from GStreamer `appsink` into the virtual camera stream.
 
