@@ -16,6 +16,8 @@ namespace
 	HRESULT g_gstInitHr = E_FAIL;
 	constexpr ULONGLONG kNoSampleLogIntervalMs = 2000;
 	constexpr ULONGLONG kFallbackLogIntervalMs = 2000;
+	constexpr PCWSTR kConfigPath = L"SOFTWARE\\VCamSample\\GStreamer";
+	constexpr PCWSTR kBinPathValueName = L"BinPath";
 
 	bool ContainsCaseInsensitive(const std::wstring& value, const std::wstring& token)
 	{
@@ -35,6 +37,101 @@ namespace
 			config.fpsNumerator,
 			config.fpsDenominator);
 	}
+
+	std::wstring GetConfiguredGStreamerBinPath()
+	{
+		HKEY key = nullptr;
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kConfigPath, 0, KEY_READ, &key) != ERROR_SUCCESS)
+		{
+			return {};
+		}
+
+		wchar_t value[4096]{};
+		DWORD size = sizeof(value);
+		const auto status = RegGetValueW(key, nullptr, kBinPathValueName, RRF_RT_REG_SZ, nullptr, value, &size);
+		RegCloseKey(key);
+		if (status != ERROR_SUCCESS)
+		{
+			return {};
+		}
+		return value;
+	}
+
+	bool EnsureBinInProcessPath(const std::wstring& binPath)
+	{
+		if (binPath.empty())
+		{
+			return false;
+		}
+
+		DWORD size = GetEnvironmentVariableW(L"PATH", nullptr, 0);
+		std::wstring currentPath;
+		if (size)
+		{
+			currentPath.resize(size);
+			GetEnvironmentVariableW(L"PATH", currentPath.data(), size);
+			if (!currentPath.empty() && currentPath.back() == L'\0')
+			{
+				currentPath.pop_back();
+			}
+		}
+
+		const auto lowerCurrent = [&]()
+		{
+			std::wstring value = currentPath;
+			std::transform(value.begin(), value.end(), value.begin(), towlower);
+			return value;
+		}();
+
+		std::wstring lowerBin = binPath;
+		std::transform(lowerBin.begin(), lowerBin.end(), lowerBin.begin(), towlower);
+
+		if (lowerCurrent.find(lowerBin) != std::wstring::npos)
+		{
+			return true;
+		}
+
+		const auto updated = binPath + L";" + currentPath;
+		return SetEnvironmentVariableW(L"PATH", updated.c_str()) != FALSE;
+	}
+
+	HRESULT PreloadGStreamerRuntime()
+	{
+		const auto binPath = GetConfiguredGStreamerBinPath();
+		if (binPath.empty())
+		{
+			WINTRACE(L"GStreamer BinPath not found in registry, relying on default DLL search path");
+			return S_OK;
+		}
+
+		EnsureBinInProcessPath(binPath);
+		SetDllDirectoryW(binPath.c_str());
+
+		const std::wstring prefix = (binPath.back() == L'\\') ? binPath : binPath + L"\\";
+		const PCWSTR dependencies[] =
+		{
+			L"glib-2.0-0.dll",
+			L"gobject-2.0-0.dll",
+			L"gstreamer-1.0-0.dll",
+			L"gstapp-1.0-0.dll",
+			L"gstvideo-1.0-0.dll"
+		};
+
+		for (const auto* dep : dependencies)
+		{
+			const auto fullPath = prefix + dep;
+			auto handle = LoadLibraryW(fullPath.c_str());
+			if (!handle)
+			{
+				const auto error = GetLastError();
+				WINTRACE(L"Failed to load dependency '%s' from '%s' err:%u", dep, fullPath.c_str(), error);
+				return HRESULT_FROM_WIN32(error ? error : ERROR_MOD_NOT_FOUND);
+			}
+		}
+
+		WINTRACE(L"GStreamer runtime preloaded from BinPath:%s", binPath.c_str());
+		return S_OK;
+	}
 }
 
 GstPipelineSource::~GstPipelineSource()
@@ -44,8 +141,15 @@ GstPipelineSource::~GstPipelineSource()
 
 HRESULT GstPipelineSource::EnsureGStreamerInitialized()
 {
-	std::call_once(g_gstInitOnce, []()
+std::call_once(g_gstInitOnce, []()
 		{
+			const auto preloadHr = PreloadGStreamerRuntime();
+			if (FAILED(preloadHr))
+			{
+				g_gstInitHr = preloadHr;
+				return;
+			}
+
 			GError* error = nullptr;
 			if (!gst_init_check(nullptr, nullptr, &error))
 			{
@@ -116,13 +220,14 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 		"drop", TRUE,
 		nullptr);
 
-	GstCaps* caps = gst_caps_new_simple(
-		"video/x-raw",
-		"format", G_TYPE_STRING, "NV12",
-		"width", G_TYPE_INT, static_cast<int>(_config.width),
-		"height", G_TYPE_INT, static_cast<int>(_config.height),
-		"framerate", GST_TYPE_FRACTION, static_cast<int>(_config.fpsNumerator), static_cast<int>(_config.fpsDenominator),
-		nullptr);
+	const auto capsDescription = std::format(
+		"video/x-raw,format=NV12,width={},height={},framerate={}/{}",
+		_config.width,
+		_config.height,
+		_config.fpsNumerator,
+		_config.fpsDenominator);
+	GstCaps* caps = gst_caps_from_string(capsDescription.c_str());
+	RETURN_HR_IF_NULL(E_FAIL, caps);
 	gst_app_sink_set_caps(_appSink, caps);
 	gst_caps_unref(caps);
 
