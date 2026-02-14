@@ -51,7 +51,12 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index, const VCamPip
 
 HRESULT MediaStream::Start(IMFMediaType* type)
 {
+	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_allocator);
+	if (_state == MF_STREAM_STATE_RUNNING)
+	{
+		return S_OK;
+	}
 	WINTRACE(
 		L"MediaStream::Start config width:%u height:%u fps:%u/%u",
 		_config.width,
@@ -85,7 +90,12 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 
 HRESULT MediaStream::Stop()
 {
+	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_allocator);
+	if (_state == MF_STREAM_STATE_STOPPED)
+	{
+		return S_OK;
+	}
 
 	RETURN_IF_FAILED(_allocator->UninitializeSampleAllocator());
 	_pipelineSource.Stop();
@@ -116,16 +126,20 @@ HRESULT MediaStream::SetD3DManager(IUnknown* manager)
 
 void MediaStream::Shutdown()
 {
+	winrt::slim_lock_guard lock(_lock);
+	_pipelineSource.Stop();
+
 	if (_queue)
 	{
 		LOG_IF_FAILED_MSG(_queue->Shutdown(), "Queue shutdown failed");
 		_queue.reset();
 	}
 
+	_allocator.reset();
 	_descriptor.reset();
 	_source.reset();
 	_attributes.reset();
-	_pipelineSource.Stop();
+	_state = MF_STREAM_STATE_STOPPED;
 }
 
 // IMFMediaEventGenerator
@@ -202,6 +216,7 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	//WINTRACE(L"MediaStream::RequestSample pToken:%p", pToken);
 	winrt::slim_lock_guard lock(_lock);
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_allocator || !_queue);
+	RETURN_HR_IF(MF_E_INVALIDREQUEST, _state != MF_STREAM_STATE_RUNNING);
 
 	wil::com_ptr_nothrow<IMFSample> sample;
 	RETURN_IF_FAILED(_allocator->AllocateSample(&sample));
@@ -244,16 +259,21 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 // IMFMediaStream2
 STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE value)
 {
-	WINTRACE(L"MediaStream::SetStreamState current:%u value:%u", _state, value);
-	if (_state == value)
+	MF_STREAM_STATE currentState = MF_STREAM_STATE_STOPPED;
+	RETURN_IF_FAILED(GetStreamState(&currentState));
+	WINTRACE(L"MediaStream::SetStreamState current:%u value:%u", currentState, value);
+	if (currentState == value)
 		return S_OK;
 	switch (value)
 	{
 	case MF_STREAM_STATE_PAUSED:
-		if (_state != MF_STREAM_STATE_RUNNING)
+		if (currentState != MF_STREAM_STATE_RUNNING)
 			RETURN_HR(MF_E_INVALID_STATE_TRANSITION);
 
-		_state = value;
+		{
+			winrt::slim_lock_guard lock(_lock);
+			_state = value;
+		}
 		break;
 
 	case MF_STREAM_STATE_RUNNING:
@@ -273,8 +293,9 @@ STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE value)
 
 STDMETHODIMP MediaStream::GetStreamState(MF_STREAM_STATE* value)
 {
-	WINTRACE(L"MediaStream::GetStreamState state:%u", _state);
 	RETURN_HR_IF_NULL(E_POINTER, value);
+	winrt::slim_lock_guard lock(_lock);
+	WINTRACE(L"MediaStream::GetStreamState state:%u", _state);
 	*value = _state;
 	return S_OK;
 }
