@@ -21,12 +21,6 @@
     <ClInclude Include="targetver.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="Resource.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="VCamSample.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="WinTrace.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -44,16 +38,6 @@
     <ClCompile Include="Tools.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <ResourceCompile Include="VCamSample.rc">
-      <Filter>Resource Files</Filter>
-    </ResourceCompile>
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="VCamSample.ico">
-      <Filter>Resource Files</Filter>
-    </Image>
   </ItemGroup>
   <ItemGroup>
     <None Include="packages.config" />

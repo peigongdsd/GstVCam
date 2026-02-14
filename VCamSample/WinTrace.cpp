@@ -44,6 +44,41 @@ static void AppendTraceToFile(PCWSTR text)
 	CloseHandle(file);
 }
 
+static void AppendTraceToConsole(PCWSTR text)
+{
+	if (!text || !*text)
+		return;
+
+	HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
+	if (!handle || handle == INVALID_HANDLE_VALUE)
+	{
+		handle = GetStdHandle(STD_OUTPUT_HANDLE);
+	}
+	if (!handle || handle == INVALID_HANDLE_VALUE)
+		return;
+
+	auto line = std::format(L"{}\r\n", text);
+
+	DWORD mode = 0;
+	if (GetConsoleMode(handle, &mode))
+	{
+		DWORD written = 0;
+		WriteConsoleW(handle, line.c_str(), static_cast<DWORD>(line.size()), &written, nullptr);
+		return;
+	}
+
+	const auto utf8Bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, nullptr, 0, nullptr, nullptr);
+	if (utf8Bytes > 1)
+	{
+		std::vector<char> buffer(static_cast<size_t>(utf8Bytes));
+		if (WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, buffer.data(), utf8Bytes, nullptr, nullptr) > 0)
+		{
+			DWORD written = 0;
+			WriteFile(handle, buffer.data(), static_cast<DWORD>(utf8Bytes - 1), &written, nullptr);
+		}
+	}
+}
+
 HRESULT GetTraceId(GUID* pGuid)
 {
 	if (!pGuid)
@@ -82,6 +117,7 @@ void WinTraceFormat(UCHAR level, ULONGLONG keyword, PCWSTR format, ...)
 	va_end(args);
 	EventWriteString(_traceHandle, level, keyword, szTrace);
 	AppendTraceToFile(szTrace);
+	AppendTraceToConsole(szTrace);
 }
 
 void WinTraceFormat(UCHAR level, ULONGLONG keyword, PCSTR format, ...)
@@ -98,6 +134,7 @@ void WinTraceFormat(UCHAR level, ULONGLONG keyword, PCSTR format, ...)
 	auto ws = to_wstring(szTrace);
 	EventWriteString(_traceHandle, level, keyword, ws.c_str());
 	AppendTraceToFile(ws.c_str());
+	AppendTraceToConsole(ws.c_str());
 }
 
 void WinTrace(UCHAR level, ULONGLONG keyword, PCSTR string)
@@ -108,6 +145,7 @@ void WinTrace(UCHAR level, ULONGLONG keyword, PCSTR string)
 	auto ws = to_wstring(string);
 	EventWriteString(_traceHandle, level, keyword, ws.c_str());
 	AppendTraceToFile(ws.c_str());
+	AppendTraceToConsole(ws.c_str());
 }
 
 void WinTrace(UCHAR level, ULONGLONG keyword, PCWSTR string)
@@ -117,4 +155,5 @@ void WinTrace(UCHAR level, ULONGLONG keyword, PCWSTR string)
 
 	EventWriteString(_traceHandle, level, keyword, string);
 	AppendTraceToFile(string);
+	AppendTraceToConsole(string);
 }

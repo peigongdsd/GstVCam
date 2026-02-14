@@ -231,7 +231,6 @@
   <ItemGroup>
     <ClInclude Include="Activator.h" />
     <ClInclude Include="EnumNames.h" />
-    <ClInclude Include="FrameGenerator.h" />
     <ClInclude Include="framework.h" />
     <ClInclude Include="GstPipelineSource.h" />
     <ClInclude Include="MediaSource.h" />
@@ -247,7 +246,6 @@
     <ClCompile Include="Activator.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="EnumNames.cpp" />
-    <ClCompile Include="FrameGenerator.cpp" />
     <ClCompile Include="GstPipelineSource.cpp" />
     <ClCompile Include="MediaSource.cpp" />
     <ClCompile Include="MediaStream.cpp" />

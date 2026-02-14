@@ -1,5 +1,6 @@
 #pragma once
 
+#include "MFTools.h"
 #include "GstPipelineSource.h"
 
 struct MediaStream : winrt::implements<MediaStream, CBaseAttributes<IMFAttributes>, IMFMediaStream2, IKsControl>

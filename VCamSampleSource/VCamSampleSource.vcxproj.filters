@@ -45,9 +45,6 @@
     <ClInclude Include="MFTools.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="FrameGenerator.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="resource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -81,9 +78,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="MFTools.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="FrameGenerator.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="GstPipelineSource.cpp">

@@ -2,8 +2,6 @@
 #include "Undocumented.h"
 #include "Tools.h"
 #include "EnumNames.h"
-#include "MFTools.h"
-#include "FrameGenerator.h"
 #include "MediaStream.h"
 #include "MediaSource.h"
 #include "Activator.h"

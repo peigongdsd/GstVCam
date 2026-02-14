@@ -26,11 +26,6 @@
 #include <ks.h>
 #include <ksproxy.h>
 #include <ksmedia.h>
-#include <dxgi.h>
-#include <d3d11.h>
-#include <d2d1_1.h>
-#include <dwrite.h>
-#include <wincodec.h>
 #include <uuids.h>
 #include "winrt\Windows.ApplicationModel.h"
 
