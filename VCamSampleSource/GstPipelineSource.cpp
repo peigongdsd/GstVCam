@@ -129,20 +129,20 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 	_bus = gst_element_get_bus(_pipeline);
 	WINTRACE(L"GstPipelineSource::Start bus:%p appsink:%p", _bus, _appSinkElement);
 
-	{
-		std::lock_guard<std::mutex> frameLock(_frameLock);
-		if (_latestSample)
 		{
-			gst_sample_unref(_latestSample);
-			_latestSample = nullptr;
+			std::lock_guard<std::mutex> frameLock(_frameLock);
+			if (_latestSample)
+			{
+				gst_sample_unref(_latestSample);
+				_latestSample = nullptr;
+			}
+			_hasFrame = false;
+			_formatMismatchLogged.store(false);
+			_firstFrameLogged.store(false);
+			_firstCopyLogged.store(false);
 		}
-		_hasFrame = false;
-		_formatMismatchLogged = false;
-		_firstFrameLogged = false;
-		_firstCopyLogged = false;
-	}
-	_lastNoSampleLogTick = GetTickCount64();
-	_lastFallbackLogTick = GetTickCount64();
+		_lastNoSampleLogTick.store(GetTickCount64());
+		_lastFallbackLogTick.store(GetTickCount64());
 
 	_running = true;
 	_pullThread = std::thread(&GstPipelineSource::PullLoop, this);
@@ -209,7 +209,7 @@ void GstPipelineSource::ResetPipelineObjects()
 void GstPipelineSource::PullLoop()
 {
 	WINTRACE(L"GstPipelineSource::PullLoop enter");
-	if (_pipeline)
+	if (_pipeline && _running.load())
 	{
 		WINTRACE(L"About to call gst_element_set_state(PLAYING)");
 		const auto stateResult = gst_element_set_state(_pipeline, GST_STATE_PLAYING);
@@ -231,7 +231,7 @@ void GstPipelineSource::PullLoop()
 		}
 	}
 
-	while (_running)
+	while (_running.load())
 	{
 		DrainBusMessages();
 
@@ -242,24 +242,23 @@ void GstPipelineSource::PullLoop()
 		}
 
 		GstSample* sample = gst_app_sink_try_pull_sample(_appSink, 200 * GST_MSECOND);
-		if (!sample)
-		{
-			const auto now = GetTickCount64();
-			if (now - _lastNoSampleLogTick >= kNoSampleLogIntervalMs)
+			if (!sample)
 			{
-				_lastNoSampleLogTick = now;
-				WINTRACE(L"No sample pulled from appsink for %llu ms", kNoSampleLogIntervalMs);
+				const auto now = GetTickCount64();
+				if (now - _lastNoSampleLogTick.load() >= kNoSampleLogIntervalMs)
+				{
+					_lastNoSampleLogTick.store(now);
+					WINTRACE(L"No sample pulled from appsink for %llu ms", kNoSampleLogIntervalMs);
+				}
+				continue;
 			}
-			continue;
-		}
-		_lastNoSampleLogTick = GetTickCount64();
+			_lastNoSampleLogTick.store(GetTickCount64());
 
-		const auto hr = StoreSample(sample);
-		if (FAILED(hr) && !_formatMismatchLogged)
-		{
-			_formatMismatchLogged = true;
-			WINTRACE(L"Could not consume sample from appsink, hr:0x%08X", hr);
-		}
+			const auto hr = StoreSample(sample);
+			if (FAILED(hr) && !_formatMismatchLogged.exchange(true))
+			{
+				WINTRACE(L"Could not consume sample from appsink, hr:0x%08X", hr);
+			}
 
 		gst_sample_unref(sample);
 	}
@@ -297,9 +296,8 @@ HRESULT GstPipelineSource::StoreSample(GstSample* sample)
 
 	const auto yStride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 0);
 	const auto uvStride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 1);
-	if (!_firstFrameLogged)
+	if (!_firstFrameLogged.exchange(true))
 	{
-		_firstFrameLogged = true;
 		const auto capsStr = gst_caps_to_string(caps);
 		WINTRACE(
 			L"First sample received caps:%S yStride:%d uvStride:%d ySize:%u uvSize:%u",
@@ -354,15 +352,15 @@ HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destination
 		}
 	}
 
-	if (!sample)
-	{
-		const auto now = GetTickCount64();
-		if (now - _lastFallbackLogTick >= kFallbackLogIntervalMs)
+		if (!sample)
 		{
-			_lastFallbackLogTick = now;
-			WINTRACE(
-				L"Using fallback black frame hasFrame:%u sample:%p stride:%ld length:%u",
-				hasFrame ? 1 : 0,
+			const auto now = GetTickCount64();
+			if (now - _lastFallbackLogTick.load() >= kFallbackLogIntervalMs)
+			{
+				_lastFallbackLogTick.store(now);
+				WINTRACE(
+					L"Using fallback black frame hasFrame:%u sample:%p stride:%ld length:%u",
+					hasFrame ? 1 : 0,
 				sample,
 				destinationStride,
 				destinationLength);
@@ -381,9 +379,8 @@ HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destination
 		}
 		return S_OK;
 	}
-	if (!_firstCopyLogged)
+	if (!_firstCopyLogged.exchange(true))
 	{
-		_firstCopyLogged = true;
 		WINTRACE(L"First frame copy to MF buffer stride:%ld length:%u", destinationStride, destinationLength);
 	}
 

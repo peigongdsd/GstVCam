@@ -260,8 +260,8 @@ STDMETHODIMP MediaSource::Start(IMFPresentationDescriptor* pPresentationDescript
 		wil::com_ptr_nothrow<IMFStreamDescriptor> thisDesc;
 		RETURN_IF_FAILED(_descriptor->GetStreamDescriptorByIndex(index, &thisSelected, &thisDesc));
 
-		MF_STREAM_STATE state;
-		RETURN_IF_FAILED(_streams[i]->GetStreamState(&state));
+			MF_STREAM_STATE state;
+			RETURN_IF_FAILED(_streams[index]->GetStreamState(&state));
 		if (thisSelected && state == MF_STREAM_STATE_STOPPED )
 		{
 			thisSelected = FALSE;

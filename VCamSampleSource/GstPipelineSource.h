@@ -43,11 +43,11 @@ private:
 	std::mutex _frameLock;
 	GstSample* _latestSample = nullptr;
 	bool _hasFrame = false;
-	bool _formatMismatchLogged = false;
-	bool _firstFrameLogged = false;
-	bool _firstCopyLogged = false;
-	ULONGLONG _lastNoSampleLogTick = 0;
-	ULONGLONG _lastFallbackLogTick = 0;
+	std::atomic<bool> _formatMismatchLogged = false;
+	std::atomic<bool> _firstFrameLogged = false;
+	std::atomic<bool> _firstCopyLogged = false;
+	std::atomic<ULONGLONG> _lastNoSampleLogTick = 0;
+	std::atomic<ULONGLONG> _lastFallbackLogTick = 0;
 
 	VCamPipelineConfig _config;
 	GstElement* _pipeline = nullptr;
