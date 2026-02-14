@@ -1,5 +1,7 @@
 #pragma once
 
+#include "GstPipelineSource.h"
+
 struct MediaStream;
 
 struct MediaSource : winrt::implements<MediaSource, CBaseAttributes<IMFAttributes>, IMFMediaSourceEx, IMFGetService, IKsControl, IMFSampleAllocatorControl>
@@ -47,7 +49,6 @@ public:
 		for (auto i = 0; i < _numStreams; i++)
 		{
 			auto stream = winrt::make_self<MediaStream>();
-			stream->Initialize(this, i);
 			_streams[i].attach(stream.detach()); // this is needed because of wil+winrt mumbo-jumbo, as "_streams[i] = stream.detach()" just cause one extra AddRef
 		}
 	}
@@ -83,5 +84,6 @@ private:
 	winrt::com_array<wil::com_ptr_nothrow<MediaStream>> _streams;
 	wil::com_ptr_nothrow<IMFMediaEventQueue> _queue;
 	wil::com_ptr_nothrow<IMFPresentationDescriptor> _descriptor;
+	VCamPipelineConfig _pipelineConfig;
 };
 

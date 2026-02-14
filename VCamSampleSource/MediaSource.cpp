@@ -3,9 +3,64 @@
 #include "Tools.h"
 #include "EnumNames.h"
 #include "MFTools.h"
-#include "FrameGenerator.h"
+#include "GstPipelineSource.h"
 #include "MediaStream.h"
 #include "MediaSource.h"
+
+namespace
+{
+	constexpr PCWSTR kConfigPath = L"SOFTWARE\\VCamSample\\GStreamer";
+	constexpr PCWSTR kPipelineValueName = L"Pipeline";
+	constexpr PCWSTR kWidthValueName = L"Width";
+	constexpr PCWSTR kHeightValueName = L"Height";
+	constexpr PCWSTR kFpsNumValueName = L"FpsNumerator";
+	constexpr PCWSTR kFpsDenValueName = L"FpsDenominator";
+
+	void LoadDwordValue(HKEY key, PCWSTR valueName, UINT* outValue)
+	{
+		DWORD value = 0;
+		DWORD size = sizeof(value);
+		if (RegGetValueW(key, nullptr, valueName, RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS && value)
+		{
+			*outValue = value;
+		}
+	}
+
+	void LoadPipelineConfigFromRegistry(VCamPipelineConfig* config)
+	{
+		config->pipeline = std::format(
+			L"videotestsrc is-live=true pattern=smpte ! video/x-raw,format=NV12,width={},height={},framerate={}/{} ! appsink name=vcamsink",
+			config->width,
+			config->height,
+			config->fpsNumerator,
+			config->fpsDenominator);
+
+		HKEY key = nullptr;
+		if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, kConfigPath, 0, KEY_READ, &key) != ERROR_SUCCESS)
+		{
+			return;
+		}
+
+		wchar_t pipeline[4096];
+		DWORD type = 0;
+		DWORD size = sizeof(pipeline);
+		if (RegGetValueW(key, nullptr, kPipelineValueName, RRF_RT_REG_SZ, &type, pipeline, &size) == ERROR_SUCCESS)
+		{
+			config->pipeline = pipeline;
+		}
+
+		LoadDwordValue(key, kWidthValueName, &config->width);
+		LoadDwordValue(key, kHeightValueName, &config->height);
+		LoadDwordValue(key, kFpsNumValueName, &config->fpsNumerator);
+		LoadDwordValue(key, kFpsDenValueName, &config->fpsDenominator);
+		if (!config->fpsDenominator)
+		{
+			config->fpsDenominator = 1;
+		}
+
+		RegCloseKey(key);
+	}
+}
 
 HRESULT MediaSource::Initialize(IMFAttributes* attributes)
 {
@@ -13,6 +68,15 @@ HRESULT MediaSource::Initialize(IMFAttributes* attributes)
 	{
 		RETURN_IF_FAILED(attributes->CopyAllItems(this));
 	}
+
+	LoadPipelineConfigFromRegistry(&_pipelineConfig);
+	WINTRACE(
+		L"VCam pipeline config width:%u height:%u fps:%u/%u pipeline:%s",
+		_pipelineConfig.width,
+		_pipelineConfig.height,
+		_pipelineConfig.fpsNumerator,
+		_pipelineConfig.fpsDenominator,
+		_pipelineConfig.pipeline.c_str());
 
 	wil::com_ptr_nothrow<IMFSensorProfileCollection> collection;
 	RETURN_IF_FAILED(MFCreateSensorProfileCollection(&collection));
@@ -44,6 +108,7 @@ HRESULT MediaSource::Initialize(IMFAttributes* attributes)
 	auto streams = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFStreamDescriptor>>(_streams.size());
 	for (uint32_t i = 0; i < streams.size(); i++)
 	{
+		RETURN_IF_FAILED(_streams[i]->Initialize(this, i, _pipelineConfig));
 		wil::com_ptr_nothrow<IMFStreamDescriptor> desc;
 		RETURN_IF_FAILED(_streams[i]->GetStreamDescriptor(&desc));
 		streams[i] = desc.detach();

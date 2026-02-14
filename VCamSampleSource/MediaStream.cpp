@@ -3,15 +3,16 @@
 #include "Tools.h"
 #include "EnumNames.h"
 #include "MFTools.h"
-#include "FrameGenerator.h"
+#include "GstPipelineSource.h"
 #include "MediaStream.h"
 #include "MediaSource.h"
 
-HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
+HRESULT MediaStream::Initialize(IMFMediaSource* source, int index, const VCamPipelineConfig& config)
 {
 	RETURN_HR_IF_NULL(E_POINTER, source);
 	_source = source;
 	_index = index;
+	_config = config;
 
 	RETURN_IF_FAILED(SetGUID(MF_DEVICESTREAM_STREAM_CATEGORY, PINNAME_VIDEO_CAPTURE));
 	RETURN_IF_FAILED(SetUINT32(MF_DEVICESTREAM_STREAM_ID, index));
@@ -20,43 +21,22 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 
 	RETURN_IF_FAILED(MFCreateEventQueue(&_queue));
 
-	// set 1 here to force RGB32 only
-	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(2);
+	auto types = wil::make_unique_cotaskmem_array<wil::com_ptr_nothrow<IMFMediaType>>(1);
 
-#define NUM_IMAGE_COLS 1280 // 640
-#define NUM_IMAGE_ROWS 960 //480
+	wil::com_ptr_nothrow<IMFMediaType> nv12Type;
+	RETURN_IF_FAILED(MFCreateMediaType(&nv12Type));
+	nv12Type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+	nv12Type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+	nv12Type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+	nv12Type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
+	MFSetAttributeSize(nv12Type.get(), MF_MT_FRAME_SIZE, _config.width, _config.height);
+	nv12Type->SetUINT32(MF_MT_DEFAULT_STRIDE, _config.width);
+	MFSetAttributeRatio(nv12Type.get(), MF_MT_FRAME_RATE, _config.fpsNumerator, _config.fpsDenominator);
 
-	wil::com_ptr_nothrow<IMFMediaType> rgbType;
-	RETURN_IF_FAILED(MFCreateMediaType(&rgbType));
-	rgbType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-	rgbType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
-	MFSetAttributeSize(rgbType.get(), MF_MT_FRAME_SIZE, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
-	rgbType->SetUINT32(MF_MT_DEFAULT_STRIDE, NUM_IMAGE_COLS * 4);
-	rgbType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-	rgbType->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-	MFSetAttributeRatio(rgbType.get(), MF_MT_FRAME_RATE, 30, 1);
-	auto bitrate = (uint32_t)(NUM_IMAGE_COLS * NUM_IMAGE_ROWS * 4 * 8 * 30);
-	rgbType->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-	MFSetAttributeRatio(rgbType.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-	types[0] = rgbType.detach();
-
-	if (types.size() > 1)
-	{
-		wil::com_ptr_nothrow<IMFMediaType> nv12Type;
-		RETURN_IF_FAILED(MFCreateMediaType(&nv12Type));
-		nv12Type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
-		nv12Type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
-		nv12Type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-		nv12Type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
-		MFSetAttributeSize(nv12Type.get(), MF_MT_FRAME_SIZE, NUM_IMAGE_COLS, NUM_IMAGE_ROWS);
-		nv12Type->SetUINT32(MF_MT_DEFAULT_STRIDE, (UINT)(NUM_IMAGE_COLS * 1.5));
-		MFSetAttributeRatio(nv12Type.get(), MF_MT_FRAME_RATE, 30, 1);
-		// frame size * pixel bit size * framerate
-		bitrate = (uint32_t)(NUM_IMAGE_COLS * 1.5 * NUM_IMAGE_ROWS * 8 * 30);
-		nv12Type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
-		MFSetAttributeRatio(nv12Type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
-		types[1] = nv12Type.detach();
-	}
+	auto bitrate = static_cast<uint32_t>((static_cast<double>(_config.width) * _config.height * 3.0 / 2.0) * 8.0 * _config.fpsNumerator / _config.fpsDenominator);
+	nv12Type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
+	MFSetAttributeRatio(nv12Type.get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+	types[0] = nv12Type.detach();
 
 	RETURN_IF_FAILED_MSG(MFCreateStreamDescriptor(_index, (DWORD)types.size(), types.get(), &_descriptor), "MFCreateStreamDescriptor failed");
 
@@ -64,6 +44,7 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 	RETURN_IF_FAILED(_descriptor->GetMediaTypeHandler(&handler));
 	TraceMFAttributes(handler.get(), L"MediaTypeHandler");
 	RETURN_IF_FAILED(handler->SetCurrentMediaType(types[0]));
+	_frameDuration = static_cast<LONGLONG>(10000000.0 * _config.fpsDenominator / _config.fpsNumerator);
 
 	return S_OK;
 }
@@ -71,6 +52,21 @@ HRESULT MediaStream::Initialize(IMFMediaSource* source, int index)
 HRESULT MediaStream::Start(IMFMediaType* type)
 {
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_allocator);
+	WINTRACE(
+		L"MediaStream::Start config width:%u height:%u fps:%u/%u",
+		_config.width,
+		_config.height,
+		_config.fpsNumerator,
+		_config.fpsDenominator);
+
+	wil::com_ptr_nothrow<IMFMediaType> currentType;
+	if (!type)
+	{
+		wil::com_ptr_nothrow<IMFMediaTypeHandler> handler;
+		RETURN_IF_FAILED(_descriptor->GetMediaTypeHandler(&handler));
+		RETURN_IF_FAILED(handler->GetCurrentMediaType(&currentType));
+		type = currentType.get();
+	}
 
 	if (type)
 	{
@@ -78,9 +74,8 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 		WINTRACE(L"MediaStream::Start format: %s", GUID_ToStringW(_format).c_str());
 	}
 
-	// at this point, set D3D manager may have not been called
-	// so we want to create a D2D1 renter target anyway
-	RETURN_IF_FAILED(_generator.EnsureRenderTarget(NUM_IMAGE_COLS, NUM_IMAGE_ROWS));
+	RETURN_HR_IF_MSG(MF_E_INVALIDMEDIATYPE, _format != MFVideoFormat_NV12, "Only NV12 stream format is supported");
+	RETURN_IF_FAILED(_pipelineSource.Start(_config));
 
 	RETURN_IF_FAILED(_allocator->InitializeSampleAllocator(10, type));
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr));
@@ -93,6 +88,7 @@ HRESULT MediaStream::Stop()
 	RETURN_HR_IF(MF_E_SHUTDOWN, !_queue || !_allocator);
 
 	RETURN_IF_FAILED(_allocator->UninitializeSampleAllocator());
+	_pipelineSource.Stop();
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStopped, GUID_NULL, S_OK, nullptr));
 	_state = MF_STREAM_STATE_STOPPED;
 	return S_OK;
@@ -113,10 +109,8 @@ HRESULT MediaStream::SetAllocator(IUnknown* allocator)
 HRESULT MediaStream::SetD3DManager(IUnknown* manager)
 {
 	RETURN_HR_IF_NULL(E_POINTER, manager);
-
-	// comment these 2 lines to force CPU usage
-	RETURN_IF_FAILED(_allocator->SetDirectXManager(manager));
-	RETURN_IF_FAILED(_generator.SetD3DManager(manager, NUM_IMAGE_COLS, NUM_IMAGE_ROWS));
+	// This stream writes CPU NV12 bytes from GStreamer appsink.
+	// Keep this as a no-op so allocator remains CPU-backed.
 	return S_OK;
 }
 
@@ -131,6 +125,7 @@ void MediaStream::Shutdown()
 	_descriptor.reset();
 	_source.reset();
 	_attributes.reset();
+	_pipelineSource.Stop();
 }
 
 // IMFMediaEventGenerator
@@ -211,17 +206,38 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	wil::com_ptr_nothrow<IMFSample> sample;
 	RETURN_IF_FAILED(_allocator->AllocateSample(&sample));
 	RETURN_IF_FAILED(sample->SetSampleTime(MFGetSystemTime()));
-	RETURN_IF_FAILED(sample->SetSampleDuration(333333));
+	RETURN_IF_FAILED(sample->SetSampleDuration(_frameDuration));
 
-	// generate frame
-	wil::com_ptr_nothrow<IMFSample> outSample;
-	RETURN_IF_FAILED(_generator.Generate(sample.get(), _format, &outSample));
+	wil::com_ptr_nothrow<IMFMediaBuffer> mediaBuffer;
+	RETURN_IF_FAILED(sample->GetBufferByIndex(0, &mediaBuffer));
+	wil::com_ptr_nothrow<IMF2DBuffer2> buffer2D;
+	RETURN_IF_FAILED(mediaBuffer->QueryInterface(IID_PPV_ARGS(&buffer2D)));
+
+	BYTE* scanline = nullptr;
+	BYTE* start = nullptr;
+	LONG pitch = 0;
+	DWORD length = 0;
+	RETURN_IF_FAILED(buffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write, &scanline, &pitch, &start, &length));
+	const auto copyHr = _pipelineSource.CopyLatestFrameTo(scanline, pitch, length);
+	buffer2D->Unlock2D();
+	RETURN_IF_FAILED(copyHr);
+	_requestCount++;
+	const auto now = GetTickCount64();
+	if (_requestCount == 1 || now - _lastRequestTraceTick >= 2000)
+	{
+		_lastRequestTraceTick = now;
+		WINTRACE(
+			L"MediaStream::RequestSample count:%u pitch:%ld length:%u",
+			_requestCount,
+			pitch,
+			length);
+	}
 
 	if (pToken)
 	{
-		RETURN_IF_FAILED(outSample->SetUnknown(MFSampleExtension_Token, pToken));
+		RETURN_IF_FAILED(sample->SetUnknown(MFSampleExtension_Token, pToken));
 	}
-	RETURN_IF_FAILED(_queue->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, outSample.get()));
+	RETURN_IF_FAILED(_queue->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, sample.get()));
 	return S_OK;
 }
 
@@ -229,7 +245,7 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 STDMETHODIMP MediaStream::SetStreamState(MF_STREAM_STATE value)
 {
 	WINTRACE(L"MediaStream::SetStreamState current:%u value:%u", _state, value);
-	if (_state = value)
+	if (_state == value)
 		return S_OK;
 	switch (value)
 	{

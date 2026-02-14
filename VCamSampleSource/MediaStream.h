@@ -1,5 +1,7 @@
 #pragma once
 
+#include "GstPipelineSource.h"
+
 struct MediaStream : winrt::implements<MediaStream, CBaseAttributes<IMFAttributes>, IMFMediaStream2, IKsControl>
 {
 public:
@@ -32,7 +34,7 @@ public:
 		SetBaseAttributesTraceName(L"MediaStreamAtts");
 	}
 
-	HRESULT Initialize(IMFMediaSource* source, int index);
+	HRESULT Initialize(IMFMediaSource* source, int index, const VCamPipelineConfig& config);
 	HRESULT SetAllocator(IUnknown* allocator);
 	MFSampleAllocatorUsage GetAllocatorUsage();
 	HRESULT SetD3DManager(IUnknown* manager);
@@ -50,8 +52,12 @@ private:
 
 	winrt::slim_mutex  _lock;
 	MF_STREAM_STATE _state;
-	FrameGenerator _generator;
+	GstPipelineSource _pipelineSource;
+	VCamPipelineConfig _config;
+	LONGLONG _frameDuration = 333333;
 	GUID _format;
+	uint32_t _requestCount = 0;
+	ULONGLONG _lastRequestTraceTick = 0;
 	wil::com_ptr_nothrow<IMFStreamDescriptor> _descriptor;
 	wil::com_ptr_nothrow<IMFMediaEventQueue> _queue;
 	wil::com_ptr_nothrow<IMFMediaSource> _source;

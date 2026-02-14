@@ -97,7 +97,11 @@
   <ImportGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'" Label="PropertySheets">
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
-  <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Label="UserMacros">
+    <GStreamerRoot>C:\Program Files\gstreamer\1.0\msvc_x86_64</GStreamerRoot>
+    <GStreamerIncludeDir>$(GStreamerRoot)\include</GStreamerIncludeDir>
+    <GStreamerLibDir>$(GStreamerRoot)\lib</GStreamerLibDir>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>
@@ -143,6 +147,7 @@
       <WarningLevel>Level3</WarningLevel>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;VCAMSAMPLESOURCE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(GStreamerIncludeDir);$(GStreamerIncludeDir)\gstreamer-1.0;$(GStreamerIncludeDir)\glib-2.0;$(GStreamerLibDir)\glib-2.0\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -154,6 +159,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>VCamSampleSource.def</ModuleDefinitionFile>
+      <AdditionalLibraryDirectories>$(GStreamerLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>gstreamer-1.0.lib;gstbase-1.0.lib;gstapp-1.0.lib;gstvideo-1.0.lib;gobject-2.0.lib;glib-2.0.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
@@ -181,6 +188,7 @@
       <IntrinsicFunctions>true</IntrinsicFunctions>
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;VCAMSAMPLESOURCE_EXPORTS;_WINDOWS;_USRDLL;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(GStreamerIncludeDir);$(GStreamerIncludeDir)\gstreamer-1.0;$(GStreamerIncludeDir)\glib-2.0;$(GStreamerLibDir)\glib-2.0\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
@@ -194,6 +202,8 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>VCamSampleSource.def</ModuleDefinitionFile>
+      <AdditionalLibraryDirectories>$(GStreamerLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>gstreamer-1.0.lib;gstbase-1.0.lib;gstapp-1.0.lib;gstvideo-1.0.lib;gobject-2.0.lib;glib-2.0.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
@@ -223,6 +233,7 @@
     <ClInclude Include="EnumNames.h" />
     <ClInclude Include="FrameGenerator.h" />
     <ClInclude Include="framework.h" />
+    <ClInclude Include="GstPipelineSource.h" />
     <ClInclude Include="MediaSource.h" />
     <ClInclude Include="MediaStream.h" />
     <ClInclude Include="MFTools.h" />
@@ -237,6 +248,7 @@
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="EnumNames.cpp" />
     <ClCompile Include="FrameGenerator.cpp" />
+    <ClCompile Include="GstPipelineSource.cpp" />
     <ClCompile Include="MediaSource.cpp" />
     <ClCompile Include="MediaStream.cpp" />
     <ClCompile Include="MFTools.cpp" />
