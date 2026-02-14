@@ -4,7 +4,6 @@
 #include <mutex>
 #include <string>
 #include <thread>
-#include <vector>
 
 typedef struct _GstElement GstElement;
 typedef struct _GstAppSink GstAppSink;
@@ -42,7 +41,7 @@ private:
 	std::mutex _stateLock;
 	std::thread _pullThread;
 	std::mutex _frameLock;
-	std::vector<BYTE> _latestFrame;
+	GstSample* _latestSample = nullptr;
 	bool _hasFrame = false;
 	bool _formatMismatchLogged = false;
 	bool _firstFrameLogged = false;

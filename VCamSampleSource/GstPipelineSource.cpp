@@ -131,7 +131,11 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 
 	{
 		std::lock_guard<std::mutex> frameLock(_frameLock);
-		_latestFrame.clear();
+		if (_latestSample)
+		{
+			gst_sample_unref(_latestSample);
+			_latestSample = nullptr;
+		}
 		_hasFrame = false;
 		_formatMismatchLogged = false;
 		_firstFrameLogged = false;
@@ -172,6 +176,16 @@ void GstPipelineSource::Stop()
 
 void GstPipelineSource::ResetPipelineObjects()
 {
+	{
+		std::lock_guard<std::mutex> lock(_frameLock);
+		if (_latestSample)
+		{
+			gst_sample_unref(_latestSample);
+			_latestSample = nullptr;
+		}
+		_hasFrame = false;
+	}
+
 	if (_bus)
 	{
 		gst_object_unref(_bus);
@@ -281,19 +295,8 @@ HRESULT GstPipelineSource::StoreSample(GstSample* sample)
 		RETURN_HR(MF_E_INVALIDMEDIATYPE);
 	}
 
-	GstVideoFrame frame;
-	RETURN_HR_IF(E_FAIL, !gst_video_frame_map(&frame, &info, buffer, GST_MAP_READ));
-
-	std::vector<BYTE> packedFrame;
-	packedFrame.resize(static_cast<size_t>(_config.width) * _config.height * 3 / 2);
-
-	BYTE* yDst = packedFrame.data();
-	BYTE* uvDst = packedFrame.data() + static_cast<size_t>(_config.width) * _config.height;
-
-	BYTE* ySrc = static_cast<BYTE*>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0));
-	BYTE* uvSrc = static_cast<BYTE*>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 1));
-	const auto yStride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0);
-	const auto uvStride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 1);
+	const auto yStride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 0);
+	const auto uvStride = GST_VIDEO_INFO_PLANE_STRIDE(&info, 1);
 	if (!_firstFrameLogged)
 	{
 		_firstFrameLogged = true;
@@ -311,21 +314,13 @@ HRESULT GstPipelineSource::StoreSample(GstSample* sample)
 		}
 	}
 
-	for (UINT row = 0; row < _config.height; row++)
-	{
-		memcpy(yDst + static_cast<size_t>(row) * _config.width, ySrc + static_cast<ptrdiff_t>(row) * yStride, _config.width);
-	}
-
-	for (UINT row = 0; row < _config.height / 2; row++)
-	{
-		memcpy(uvDst + static_cast<size_t>(row) * _config.width, uvSrc + static_cast<ptrdiff_t>(row) * uvStride, _config.width);
-	}
-
-	gst_video_frame_unmap(&frame);
-
 	{
 		std::lock_guard<std::mutex> lock(_frameLock);
-		_latestFrame.swap(packedFrame);
+		if (_latestSample)
+		{
+			gst_sample_unref(_latestSample);
+		}
+		_latestSample = gst_sample_ref(sample);
 		_hasFrame = true;
 	}
 	return S_OK;
@@ -340,17 +335,35 @@ HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destination
 	const auto requiredLength = static_cast<size_t>(destinationStride) * _config.height * 3 / 2;
 	RETURN_HR_IF(E_BOUNDS, destinationLength < requiredLength);
 
-	std::lock_guard<std::mutex> lock(_frameLock);
-	if (!_hasFrame || _latestFrame.size() < static_cast<size_t>(_config.width) * _config.height * 3 / 2)
+	GstSample* sample = nullptr;
+	bool hasFrame = false;
+	HRESULT hr = S_OK;
+	bool frameMapped = false;
+	GstVideoFrame frame{};
+	const BYTE* ySrc = nullptr;
+	const BYTE* uvSrc = nullptr;
+	int yStride = 0;
+	int uvStride = 0;
+	BYTE* uvDst = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(_frameLock);
+		hasFrame = _hasFrame;
+		if (_hasFrame && _latestSample)
+		{
+			sample = gst_sample_ref(_latestSample);
+		}
+	}
+
+	if (!sample)
 	{
 		const auto now = GetTickCount64();
 		if (now - _lastFallbackLogTick >= kFallbackLogIntervalMs)
 		{
 			_lastFallbackLogTick = now;
 			WINTRACE(
-				L"Using fallback black frame hasFrame:%u latestFrameBytes:%zu stride:%ld length:%u",
-				_hasFrame ? 1 : 0,
-				_latestFrame.size(),
+				L"Using fallback black frame hasFrame:%u sample:%p stride:%ld length:%u",
+				hasFrame ? 1 : 0,
+				sample,
 				destinationStride,
 				destinationLength);
 		}
@@ -374,25 +387,67 @@ HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destination
 		WINTRACE(L"First frame copy to MF buffer stride:%ld length:%u", destinationStride, destinationLength);
 	}
 
-	const BYTE* ySrc = _latestFrame.data();
-	const BYTE* uvSrc = _latestFrame.data() + static_cast<size_t>(_config.width) * _config.height;
+	GstCaps* caps = gst_sample_get_caps(sample);
+	GstBuffer* buffer = gst_sample_get_buffer(sample);
+	if (!caps || !buffer)
+	{
+		hr = E_FAIL;
+		goto Cleanup;
+	}
+
+	GstVideoInfo info;
+	if (!gst_video_info_from_caps(&info, caps))
+	{
+		hr = E_FAIL;
+		goto Cleanup;
+	}
+	if (GST_VIDEO_INFO_FORMAT(&info) != GST_VIDEO_FORMAT_NV12)
+	{
+		hr = MF_E_INVALIDMEDIATYPE;
+		goto Cleanup;
+	}
+	if (GST_VIDEO_INFO_WIDTH(&info) != _config.width || GST_VIDEO_INFO_HEIGHT(&info) != _config.height)
+	{
+		hr = MF_E_INVALIDMEDIATYPE;
+		goto Cleanup;
+	}
+
+	if (!gst_video_frame_map(&frame, &info, buffer, GST_MAP_READ))
+	{
+		hr = E_FAIL;
+		goto Cleanup;
+	}
+	frameMapped = true;
+
+	ySrc = static_cast<const BYTE*>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 0));
+	uvSrc = static_cast<const BYTE*>(GST_VIDEO_FRAME_PLANE_DATA(&frame, 1));
+	yStride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 0);
+	uvStride = GST_VIDEO_FRAME_PLANE_STRIDE(&frame, 1);
+
 	for (UINT row = 0; row < _config.height; row++)
 	{
 		memcpy(
 			destination + static_cast<size_t>(row) * destinationStride,
-			ySrc + static_cast<size_t>(row) * _config.width,
+			ySrc + static_cast<ptrdiff_t>(row) * yStride,
 			_config.width);
 	}
 
-	BYTE* uvDst = destination + static_cast<size_t>(destinationStride) * _config.height;
+	uvDst = destination + static_cast<size_t>(destinationStride) * _config.height;
 	for (UINT row = 0; row < _config.height / 2; row++)
 	{
 		memcpy(
 			uvDst + static_cast<size_t>(row) * destinationStride,
-			uvSrc + static_cast<size_t>(row) * _config.width,
+			uvSrc + static_cast<ptrdiff_t>(row) * uvStride,
 			_config.width);
 	}
-	return S_OK;
+
+Cleanup:
+	if (frameMapped)
+	{
+		gst_video_frame_unmap(&frame);
+	}
+	gst_sample_unref(sample);
+	return hr;
 }
 
 void GstPipelineSource::DrainBusMessages()
