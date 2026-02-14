@@ -3,10 +3,332 @@
 #include "Tools.h"
 #include "EnumNames.h"
 #include "Activator.h"
+#include <cwctype>
 
 // 3cad447d-f283-4af4-a3b2-6f5363309f52
 GUID CLSID_VCam = { 0x3cad447d,0xf283,0x4af4,{0xa3,0xb2,0x6f,0x53,0x63,0x30,0x9f,0x52} };
 HMODULE _hModule;
+using registry_key = winrt::handle_type<registry_traits>;
+constexpr PCWSTR kVirtualCameraName = L"VCamSample";
+constexpr PCWSTR kGstConfigPath = L"SOFTWARE\\VCamSample\\GStreamer";
+constexpr PCWSTR kPipelineValueName = L"Pipeline";
+constexpr PCWSTR kWidthValueName = L"Width";
+constexpr PCWSTR kHeightValueName = L"Height";
+constexpr PCWSTR kFpsNumValueName = L"FpsNumerator";
+constexpr PCWSTR kFpsDenValueName = L"FpsDenominator";
+constexpr DWORD kDefaultWidth = 1280;
+constexpr DWORD kDefaultHeight = 960;
+constexpr DWORD kDefaultFpsNum = 30;
+constexpr DWORD kDefaultFpsDen = 1;
+
+std::wstring Trim(std::wstring value)
+{
+	const auto isTrimChar = [](wchar_t ch) { return ch == L' ' || ch == L'\t' || ch == L'\r' || ch == L'\n'; };
+	while (!value.empty() && isTrimChar(value.front()))
+	{
+		value.erase(value.begin());
+	}
+	while (!value.empty() && isTrimChar(value.back()))
+	{
+		value.pop_back();
+	}
+
+	if (value.size() >= 2 && value.front() == L'"' && value.back() == L'"')
+	{
+		value = value.substr(1, value.size() - 2);
+	}
+	return value;
+}
+
+bool TryParseUIntToken(const std::wstring& text, const std::wstring& token, DWORD* outValue)
+{
+	const auto pos = text.find(token);
+	if (pos == std::wstring::npos)
+	{
+		return false;
+	}
+
+	auto cursor = pos + token.size();
+	if (cursor >= text.size() || !iswdigit(text[cursor]))
+	{
+		return false;
+	}
+
+	DWORD value = 0;
+	while (cursor < text.size() && iswdigit(text[cursor]))
+	{
+		value = value * 10 + (text[cursor] - L'0');
+		cursor++;
+	}
+
+	*outValue = value;
+	return true;
+}
+
+bool TryParseFramerateToken(const std::wstring& text, DWORD* numerator, DWORD* denominator)
+{
+	constexpr PCWSTR token = L"framerate=";
+	const auto pos = text.find(token);
+	if (pos == std::wstring::npos)
+	{
+		return false;
+	}
+
+	auto cursor = pos + wcslen(token);
+	if (cursor >= text.size() || !iswdigit(text[cursor]))
+	{
+		return false;
+	}
+
+	DWORD num = 0;
+	while (cursor < text.size() && iswdigit(text[cursor]))
+	{
+		num = num * 10 + (text[cursor] - L'0');
+		cursor++;
+	}
+
+	DWORD den = 1;
+	if (cursor < text.size() && text[cursor] == L'/')
+	{
+		cursor++;
+		if (cursor >= text.size() || !iswdigit(text[cursor]))
+		{
+			return false;
+		}
+
+		den = 0;
+		while (cursor < text.size() && iswdigit(text[cursor]))
+		{
+			den = den * 10 + (text[cursor] - L'0');
+			cursor++;
+		}
+	}
+
+	if (!num || !den)
+	{
+		return false;
+	}
+
+	*numerator = num;
+	*denominator = den;
+	return true;
+}
+
+std::wstring BuildDefaultPipeline(DWORD width, DWORD height, DWORD fpsNum, DWORD fpsDen)
+{
+	return std::format(
+		L"videotestsrc is-live=true pattern=smpte ! video/x-raw,format=NV12,width={},height={},framerate={}/{} ! appsink name=vcamsink",
+		width,
+		height,
+		fpsNum,
+		fpsDen);
+}
+
+std::wstring ToLower(std::wstring value)
+{
+	for (auto& ch : value)
+	{
+		ch = static_cast<wchar_t>(towlower(ch));
+	}
+	return value;
+}
+
+std::wstring ResolvePipelineOverride(PCWSTR input)
+{
+	auto value = Trim(input ? input : L"");
+	if (value.empty())
+	{
+		return {};
+	}
+
+	const auto lowerValue = ToLower(value);
+	constexpr PCWSTR kPrefix = L"pipeline=";
+	if (lowerValue.rfind(kPrefix, 0) == 0)
+	{
+		return Trim(value.substr(wcslen(kPrefix)));
+	}
+
+	// Accept raw pipeline text only if it clearly looks like a GStreamer pipeline.
+	if (value.find(L'!') != std::wstring::npos)
+	{
+		return value;
+	}
+	return {};
+}
+
+bool TryReadDwordValue(HKEY key, PCWSTR valueName, DWORD* outValue)
+{
+	DWORD value = 0;
+	DWORD size = sizeof(value);
+	if (RegGetValueW(key, nullptr, valueName, RRF_RT_REG_DWORD, nullptr, &value, &size) == ERROR_SUCCESS)
+	{
+		*outValue = value;
+		return true;
+	}
+	return false;
+}
+
+HRESULT SetDwordValue(HKEY key, PCWSTR valueName, DWORD value)
+{
+	return HRESULT_FROM_WIN32(RegSetValueExW(key, valueName, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)));
+}
+
+HRESULT SetStringValue(HKEY key, PCWSTR valueName, const std::wstring& value)
+{
+	return HRESULT_FROM_WIN32(RegSetValueExW(key, valueName, 0, REG_SZ, reinterpret_cast<const BYTE*>(value.c_str()), static_cast<DWORD>((value.size() + 1) * sizeof(wchar_t))));
+}
+
+HRESULT EnsurePipelineRegistry(PCWSTR pipelineOverride)
+{
+	registry_key key;
+	const auto openStatus = RegCreateKeyExW(HKEY_LOCAL_MACHINE, kGstConfigPath, 0, nullptr, 0, KEY_READ | KEY_WRITE, nullptr, key.put(), nullptr);
+	RETURN_HR_IF(HRESULT_FROM_WIN32(openStatus), openStatus != ERROR_SUCCESS);
+
+	DWORD width = kDefaultWidth;
+	DWORD height = kDefaultHeight;
+	DWORD fpsNum = kDefaultFpsNum;
+	DWORD fpsDen = kDefaultFpsDen;
+	std::wstring pipeline;
+
+	bool hasWidth = TryReadDwordValue(key.get(), kWidthValueName, &width) && width != 0;
+	bool hasHeight = TryReadDwordValue(key.get(), kHeightValueName, &height) && height != 0;
+	bool hasFpsNum = TryReadDwordValue(key.get(), kFpsNumValueName, &fpsNum) && fpsNum != 0;
+	bool hasFpsDen = TryReadDwordValue(key.get(), kFpsDenValueName, &fpsDen) && fpsDen != 0;
+
+	if (!hasWidth) width = kDefaultWidth;
+	if (!hasHeight) height = kDefaultHeight;
+	if (!hasFpsNum) fpsNum = kDefaultFpsNum;
+	if (!hasFpsDen) fpsDen = kDefaultFpsDen;
+
+	wchar_t pipelineBuffer[4096]{};
+	DWORD pipelineSize = sizeof(pipelineBuffer);
+	const auto pipelineReadStatus = RegGetValueW(key.get(), nullptr, kPipelineValueName, RRF_RT_REG_SZ, nullptr, pipelineBuffer, &pipelineSize);
+	if (pipelineReadStatus == ERROR_SUCCESS)
+	{
+		pipeline = pipelineBuffer;
+	}
+
+	const auto overridePipeline = Trim(pipelineOverride ? pipelineOverride : L"");
+	if (!overridePipeline.empty())
+	{
+		pipeline = overridePipeline;
+	}
+
+	if (pipeline.empty())
+	{
+		pipeline = BuildDefaultPipeline(width, height, fpsNum, fpsDen);
+	}
+
+	DWORD parsedWidth = 0;
+	DWORD parsedHeight = 0;
+	DWORD parsedFpsNum = 0;
+	DWORD parsedFpsDen = 0;
+
+	if (TryParseUIntToken(pipeline, L"width=", &parsedWidth) && parsedWidth)
+	{
+		width = parsedWidth;
+	}
+	if (TryParseUIntToken(pipeline, L"height=", &parsedHeight) && parsedHeight)
+	{
+		height = parsedHeight;
+	}
+	if (TryParseFramerateToken(pipeline, &parsedFpsNum, &parsedFpsDen) && parsedFpsNum && parsedFpsDen)
+	{
+		fpsNum = parsedFpsNum;
+		fpsDen = parsedFpsDen;
+	}
+
+	RETURN_IF_FAILED(SetStringValue(key.get(), kPipelineValueName, pipeline));
+	RETURN_IF_FAILED(SetDwordValue(key.get(), kWidthValueName, width));
+	RETURN_IF_FAILED(SetDwordValue(key.get(), kHeightValueName, height));
+	RETURN_IF_FAILED(SetDwordValue(key.get(), kFpsNumValueName, fpsNum));
+	RETURN_IF_FAILED(SetDwordValue(key.get(), kFpsDenValueName, fpsDen));
+
+	WINTRACE(L"Pipeline registry configured width:%u height:%u fps:%u/%u pipeline:%s", width, height, fpsNum, fpsDen, pipeline.c_str());
+	return S_OK;
+}
+
+HRESULT ConfigureVirtualCameraRegistration(bool install)
+{
+	wil::com_ptr_nothrow<IMFVirtualCamera> vcam;
+	const auto clsid = GUID_ToStringW(CLSID_VCam, false);
+
+	RETURN_IF_FAILED_MSG(MFCreateVirtualCamera(
+		MFVirtualCameraType_SoftwareCameraSource,
+		MFVirtualCameraLifetime_System,
+		MFVirtualCameraAccess_CurrentUser,
+		kVirtualCameraName,
+		clsid.c_str(),
+		nullptr,
+		0,
+		&vcam),
+		"MFCreateVirtualCamera failed");
+
+	if (install)
+	{
+		RETURN_IF_FAILED_MSG(vcam->Start(nullptr), "IMFVirtualCamera::Start failed");
+		WINTRACE(L"DllInstall virtual camera provisioned clsid:%s", clsid.c_str());
+		return S_OK;
+	}
+
+	const auto hr = vcam->Remove();
+	if (SUCCEEDED(hr))
+	{
+		WINTRACE(L"DllInstall virtual camera removed clsid:%s", clsid.c_str());
+	}
+	else
+	{
+		WINTRACE(L"DllInstall virtual camera remove failed hr:0x%08X clsid:%s", hr, clsid.c_str());
+	}
+	return hr;
+}
+
+HRESULT RunVirtualCameraProvisioning(bool install, PCWSTR pipelineOverride)
+{
+	HRESULT hr = S_OK;
+	auto coInitHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+	auto shouldUninitializeCom = SUCCEEDED(coInitHr);
+	if (coInitHr == RPC_E_CHANGED_MODE)
+	{
+		coInitHr = S_OK;
+		shouldUninitializeCom = false;
+	}
+	if (FAILED(coInitHr))
+	{
+		return coInitHr;
+	}
+
+	auto mfInitHr = MFStartup(MF_VERSION);
+	auto shouldShutdownMf = SUCCEEDED(mfInitHr);
+	const auto pipelineText = ResolvePipelineOverride(pipelineOverride);
+	if (FAILED(mfInitHr))
+	{
+		hr = mfInitHr;
+		goto Cleanup;
+	}
+
+	if (install || !pipelineText.empty())
+	{
+		hr = EnsurePipelineRegistry(pipelineText.c_str());
+		if (FAILED(hr))
+		{
+			goto Cleanup;
+		}
+	}
+
+	hr = ConfigureVirtualCameraRegistration(install);
+
+Cleanup:
+	if (shouldShutdownMf)
+	{
+		MFShutdown();
+	}
+	if (shouldUninitializeCom)
+	{
+		CoUninitialize();
+	}
+	return hr;
+}
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 {
@@ -89,8 +411,6 @@ STDAPI DllGetClassObject(_In_ REFCLSID rclsid, _In_ REFIID riid, _Outptr_ LPVOID
 	RETURN_HR(E_NOINTERFACE);
 }
 
-using registry_key = winrt::handle_type<registry_traits>;
-
 STDAPI DllRegisterServer()
 {
 	std::wstring exePath = wil::GetModuleFileNameW(_hModule).get();
@@ -104,6 +424,7 @@ STDAPI DllRegisterServer()
 	RETURN_IF_WIN32_ERROR(RegWriteKey(HKEY_LOCAL_MACHINE, path.c_str(), key.put()));
 	RETURN_IF_WIN32_ERROR(RegWriteValue(key.get(), nullptr, exePath));
 	RETURN_IF_WIN32_ERROR(RegWriteValue(key.get(), L"ThreadingModel", L"Both"));
+	RETURN_IF_FAILED_MSG(RunVirtualCameraProvisioning(true, nullptr), "Virtual camera provisioning failed during DllRegisterServer");
 	return S_OK;
 }
 
@@ -111,8 +432,19 @@ STDAPI DllUnregisterServer()
 {
 	std::wstring exePath = wil::GetModuleFileNameW(_hModule).get();
 	WINTRACE(L"DllUnregisterServer '%s'", exePath.c_str());
+	const auto removeHr = RunVirtualCameraProvisioning(false, nullptr);
+	if (FAILED(removeHr))
+	{
+		WINTRACE(L"Virtual camera remove during DllUnregisterServer failed hr:0x%08X", removeHr);
+	}
 	auto clsid = GUID_ToStringW(CLSID_VCam, false);
 	std::wstring path = L"Software\\Classes\\CLSID\\" + clsid;
 	RETURN_IF_WIN32_ERROR(RegDeleteTree(HKEY_LOCAL_MACHINE, path.c_str()));
 	return S_OK;
+}
+
+STDAPI DllInstall(BOOL bInstall, PCWSTR pszCmdLine)
+{
+	WINTRACE(L"DllInstall install:%u cmd:%s", bInstall ? 1 : 0, pszCmdLine ? pszCmdLine : L"");
+	return RunVirtualCameraProvisioning(bInstall != FALSE, pszCmdLine);
 }
