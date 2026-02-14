@@ -12,7 +12,6 @@ using registry_key = winrt::handle_type<registry_traits>;
 constexpr PCWSTR kVirtualCameraName = L"VCamSample";
 constexpr PCWSTR kGstConfigPath = L"SOFTWARE\\VCamSample\\GStreamer";
 constexpr PCWSTR kPipelineValueName = L"Pipeline";
-constexpr PCWSTR kBinPathValueName = L"BinPath";
 constexpr PCWSTR kWidthValueName = L"Width";
 constexpr PCWSTR kHeightValueName = L"Height";
 constexpr PCWSTR kFpsNumValueName = L"FpsNumerator";
@@ -169,90 +168,6 @@ bool TryReadDwordValue(HKEY key, PCWSTR valueName, DWORD* outValue)
 	return false;
 }
 
-bool TryReadStringValue(HKEY key, PCWSTR valueName, std::wstring* outValue)
-{
-	if (!outValue)
-	{
-		return false;
-	}
-	wchar_t buffer[4096]{};
-	DWORD size = sizeof(buffer);
-	if (RegGetValueW(key, nullptr, valueName, RRF_RT_REG_SZ, nullptr, buffer, &size) == ERROR_SUCCESS)
-	{
-		*outValue = buffer;
-		return true;
-	}
-	return false;
-}
-
-bool IsExistingFile(const std::wstring& path)
-{
-	const auto attributes = GetFileAttributesW(path.c_str());
-	return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
-}
-
-bool IsValidGStreamerBinPath(const std::wstring& binPath)
-{
-	if (binPath.empty())
-	{
-		return false;
-	}
-
-	const auto prefix = binPath.back() == L'\\' ? binPath : binPath + L"\\";
-	return IsExistingFile(prefix + L"gstreamer-1.0-0.dll") &&
-		IsExistingFile(prefix + L"gstapp-1.0-0.dll") &&
-		IsExistingFile(prefix + L"gstvideo-1.0-0.dll");
-}
-
-std::wstring FindDefaultGStreamerBinPath()
-{
-	const std::wstring preferred = L"C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64\\bin";
-	if (IsValidGStreamerBinPath(preferred))
-	{
-		return preferred;
-	}
-
-	const std::wstring roots[] =
-	{
-		L"C:\\Program Files\\gstreamer\\1.0\\",
-		L"C:\\Program Files (x86)\\gstreamer\\1.0\\"
-	};
-
-	for (const auto& root : roots)
-	{
-		WIN32_FIND_DATAW findData{};
-		const auto searchPattern = root + L"msvc_*";
-		auto findHandle = FindFirstFileW(searchPattern.c_str(), &findData);
-		if (findHandle == INVALID_HANDLE_VALUE)
-		{
-			continue;
-		}
-
-		do
-		{
-			if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
-			{
-				continue;
-			}
-			if (wcscmp(findData.cFileName, L".") == 0 || wcscmp(findData.cFileName, L"..") == 0)
-			{
-				continue;
-			}
-
-			const auto candidate = root + findData.cFileName + L"\\bin";
-			if (IsValidGStreamerBinPath(candidate))
-			{
-				FindClose(findHandle);
-				return candidate;
-			}
-		} while (FindNextFileW(findHandle, &findData));
-
-		FindClose(findHandle);
-	}
-
-	return {};
-}
-
 HRESULT SetDwordValue(HKEY key, PCWSTR valueName, DWORD value)
 {
 	return HRESULT_FROM_WIN32(RegSetValueExW(key, valueName, 0, REG_DWORD, reinterpret_cast<const BYTE*>(&value), sizeof(value)));
@@ -284,17 +199,6 @@ HRESULT EnsurePipelineRegistry(PCWSTR pipelineOverride)
 	if (!hasHeight) height = kDefaultHeight;
 	if (!hasFpsNum) fpsNum = kDefaultFpsNum;
 	if (!hasFpsDen) fpsDen = kDefaultFpsDen;
-
-	std::wstring binPath;
-	const auto hasBinPath = TryReadStringValue(key.get(), kBinPathValueName, &binPath) && IsValidGStreamerBinPath(binPath);
-	if (!hasBinPath)
-	{
-		binPath = FindDefaultGStreamerBinPath();
-		if (!binPath.empty())
-		{
-			RETURN_IF_FAILED(SetStringValue(key.get(), kBinPathValueName, binPath));
-		}
-	}
 
 	wchar_t pipelineBuffer[4096]{};
 	DWORD pipelineSize = sizeof(pipelineBuffer);
@@ -340,14 +244,7 @@ HRESULT EnsurePipelineRegistry(PCWSTR pipelineOverride)
 	RETURN_IF_FAILED(SetDwordValue(key.get(), kFpsNumValueName, fpsNum));
 	RETURN_IF_FAILED(SetDwordValue(key.get(), kFpsDenValueName, fpsDen));
 
-	if (!binPath.empty())
-	{
-		WINTRACE(L"Pipeline registry configured width:%u height:%u fps:%u/%u bin:%s pipeline:%s", width, height, fpsNum, fpsDen, binPath.c_str(), pipeline.c_str());
-	}
-	else
-	{
-		WINTRACE(L"Pipeline registry configured width:%u height:%u fps:%u/%u bin:<not found> pipeline:%s", width, height, fpsNum, fpsDen, pipeline.c_str());
-	}
+	WINTRACE(L"Pipeline registry configured width:%u height:%u fps:%u/%u pipeline:%s", width, height, fpsNum, fpsDen, pipeline.c_str());
 	return S_OK;
 }
 

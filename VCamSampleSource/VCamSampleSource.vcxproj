@@ -160,8 +160,7 @@
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>VCamSampleSource.def</ModuleDefinitionFile>
       <AdditionalLibraryDirectories>$(GStreamerLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>delayimp.lib;gstreamer-1.0.lib;gstbase-1.0.lib;gstapp-1.0.lib;gstvideo-1.0.lib;gobject-2.0.lib;glib-2.0.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>gstreamer-1.0-0.dll;gstapp-1.0-0.dll;gstvideo-1.0-0.dll;gobject-2.0-0.dll;glib-2.0-0.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>gstreamer-1.0.lib;gstbase-1.0.lib;gstapp-1.0.lib;gstvideo-1.0.lib;gobject-2.0.lib;glib-2.0.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM64'">
@@ -204,8 +203,7 @@
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>VCamSampleSource.def</ModuleDefinitionFile>
       <AdditionalLibraryDirectories>$(GStreamerLibDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>delayimp.lib;gstreamer-1.0.lib;gstbase-1.0.lib;gstapp-1.0.lib;gstvideo-1.0.lib;gobject-2.0.lib;glib-2.0.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <DelayLoadDLLs>gstreamer-1.0-0.dll;gstapp-1.0-0.dll;gstvideo-1.0-0.dll;gobject-2.0-0.dll;glib-2.0-0.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+      <AdditionalDependencies>gstreamer-1.0.lib;gstbase-1.0.lib;gstapp-1.0.lib;gstvideo-1.0.lib;gobject-2.0.lib;glib-2.0.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM64'">
