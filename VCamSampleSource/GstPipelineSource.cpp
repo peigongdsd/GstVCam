@@ -29,7 +29,8 @@ namespace
 	std::wstring BuildDefaultPipeline(const VCamPipelineConfig& config)
 	{
 		return std::format(
-			L"videotestsrc is-live=true pattern=smpte ! video/x-raw,format=NV12,width={},height={},framerate={}/{} ! appsink name=vcamsink",
+			//L"videotestsrc is-live=true pattern=smpte ! video/x-raw,format=NV12,width={},height={},framerate={}/{} ! appsink name=vcamsink",
+			L"shm2src shm-path=ivshmem://PCI\\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01\\3&11583659&0&88 is-live=true latest-only=true ! video/x-raw,format=NV12,width={},height={},framerate={}/{} ! appsink name=vcamsink",
 			config.width,
 			config.height,
 			config.fpsNumerator,
@@ -113,7 +114,7 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 	g_object_set(
 		G_OBJECT(appSinkElement),
 		"emit-signals", FALSE,
-		"sync", FALSE,
+		"sync", TRUE,
 		"max-buffers", 2u,
 		"drop", TRUE,
 		nullptr);

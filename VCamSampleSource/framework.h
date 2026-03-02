@@ -13,6 +13,8 @@
 #endif
 
 // Windows Header Files
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <windows.h>
 #include <evntprov.h>
 #include <strsafe.h>

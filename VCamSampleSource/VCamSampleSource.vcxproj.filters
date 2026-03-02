@@ -51,6 +51,9 @@
     <ClInclude Include="GstPipelineSource.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="TcpKick.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="dllmain.cpp">
@@ -81,6 +84,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="GstPipelineSource.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="TcpKick.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

@@ -16,10 +16,12 @@ constexpr PCWSTR kWidthValueName = L"Width";
 constexpr PCWSTR kHeightValueName = L"Height";
 constexpr PCWSTR kFpsNumValueName = L"FpsNumerator";
 constexpr PCWSTR kFpsDenValueName = L"FpsDenominator";
+constexpr PCWSTR kLogEndpointValueName = L"LogEndpoint";
 constexpr DWORD kDefaultWidth = 1280;
 constexpr DWORD kDefaultHeight = 960;
 constexpr DWORD kDefaultFpsNum = 30;
 constexpr DWORD kDefaultFpsDen = 1;
+constexpr PCWSTR kDefaultLogEndpoint = L"tcp://192.168.120.1:5555";
 
 std::wstring Trim(std::wstring value)
 {
@@ -189,6 +191,7 @@ HRESULT EnsurePipelineRegistry(PCWSTR pipelineOverride)
 	DWORD fpsNum = kDefaultFpsNum;
 	DWORD fpsDen = kDefaultFpsDen;
 	std::wstring pipeline;
+	std::wstring logEndpoint;
 
 	bool hasWidth = TryReadDwordValue(key.get(), kWidthValueName, &width) && width != 0;
 	bool hasHeight = TryReadDwordValue(key.get(), kHeightValueName, &height) && height != 0;
@@ -208,6 +211,14 @@ HRESULT EnsurePipelineRegistry(PCWSTR pipelineOverride)
 		pipeline = pipelineBuffer;
 	}
 
+	wchar_t logEndpointBuffer[512]{};
+	DWORD logEndpointSize = sizeof(logEndpointBuffer);
+	const auto logEndpointReadStatus = RegGetValueW(key.get(), nullptr, kLogEndpointValueName, RRF_RT_REG_SZ, nullptr, logEndpointBuffer, &logEndpointSize);
+	if (logEndpointReadStatus == ERROR_SUCCESS)
+	{
+		logEndpoint = logEndpointBuffer;
+	}
+
 	const auto overridePipeline = Trim(pipelineOverride ? pipelineOverride : L"");
 	if (!overridePipeline.empty())
 	{
@@ -217,6 +228,10 @@ HRESULT EnsurePipelineRegistry(PCWSTR pipelineOverride)
 	if (pipeline.empty())
 	{
 		pipeline = BuildDefaultPipeline(width, height, fpsNum, fpsDen);
+	}
+	if (logEndpoint.empty())
+	{
+		logEndpoint = kDefaultLogEndpoint;
 	}
 
 	DWORD parsedWidth = 0;
@@ -243,8 +258,9 @@ HRESULT EnsurePipelineRegistry(PCWSTR pipelineOverride)
 	RETURN_IF_FAILED(SetDwordValue(key.get(), kHeightValueName, height));
 	RETURN_IF_FAILED(SetDwordValue(key.get(), kFpsNumValueName, fpsNum));
 	RETURN_IF_FAILED(SetDwordValue(key.get(), kFpsDenValueName, fpsDen));
+	RETURN_IF_FAILED(SetStringValue(key.get(), kLogEndpointValueName, logEndpoint));
 
-	WINTRACE(L"Pipeline registry configured width:%u height:%u fps:%u/%u pipeline:%s", width, height, fpsNum, fpsDen, pipeline.c_str());
+	WINTRACE(L"Pipeline registry configured width:%u height:%u fps:%u/%u log:%s pipeline:%s", width, height, fpsNum, fpsDen, logEndpoint.c_str(), pipeline.c_str());
 	return S_OK;
 }
 

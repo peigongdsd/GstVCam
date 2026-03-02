@@ -4,6 +4,7 @@
 #include "EnumNames.h"
 #include "MFTools.h"
 #include "GstPipelineSource.h"
+#include "TcpKick.h"
 #include "MediaStream.h"
 #include "MediaSource.h"
 
@@ -81,7 +82,13 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 	}
 
 	RETURN_HR_IF_MSG(MF_E_INVALIDMEDIATYPE, _format != MFVideoFormat_NV12, "Only NV12 stream format is supported");
-	RETURN_IF_FAILED(_pipelineSource.Start(_config));
+	RETURN_IF_FAILED_MSG(TcpKickConnectFromRegistry(), "TcpKickConnectFromRegistry failed");
+	const auto startHr = _pipelineSource.Start(_config);
+	if (FAILED(startHr))
+	{
+		TcpKickDisconnect();
+		return startHr;
+	}
 
 	RETURN_IF_FAILED(_allocator->InitializeSampleAllocator(10, type));
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr));
@@ -101,6 +108,7 @@ HRESULT MediaStream::Stop()
 
 	RETURN_IF_FAILED(_allocator->UninitializeSampleAllocator());
 	_pipelineSource.Stop();
+	TcpKickDisconnect();
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStopped, GUID_NULL, S_OK, nullptr));
 	_state = MF_STREAM_STATE_STOPPED;
 	return S_OK;
@@ -131,6 +139,7 @@ void MediaStream::Shutdown()
 	// Hold the same lock used by request/start/stop so teardown is ordered.
 	winrt::slim_lock_guard lock(_lock);
 	_pipelineSource.Stop();
+	TcpKickDisconnect();
 
 	if (_queue)
 	{

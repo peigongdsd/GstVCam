@@ -370,10 +370,22 @@ STDMETHODIMP MediaSource::SetD3DManager(IUnknown* pManager)
 // IMFGetService
 STDMETHODIMP MediaSource::GetService(REFGUID siid, REFIID iid, LPVOID* ppvObject)
 {
+	RETURN_HR_IF_NULL(E_POINTER, ppvObject);
+	*ppvObject = nullptr;
+
+	WINTRACE(L"MediaSource::GetService siid '%s' iid '%s'", GUID_ToStringW(siid).c_str(), GUID_ToStringW(iid).c_str());
+
+	// Expose interfaces this source already implements.
+	const auto qiHr = QueryInterface(iid, ppvObject);
+	if (SUCCEEDED(qiHr))
+	{
+		return S_OK;
+	}
+
 	if (iid == __uuidof(IMFDeviceController) || iid == __uuidof(IMFDeviceController2))
 		return MF_E_UNSUPPORTED_SERVICE;
 
-	WINTRACE(L"MediaSource::GetService siid '%s' iid '%s' failed", GUID_ToStringW(siid).c_str(), GUID_ToStringW(iid).c_str());
+	WINTRACE(L"MediaSource::GetService unsupported siid '%s' iid '%s' qih:0x%08X", GUID_ToStringW(siid).c_str(), GUID_ToStringW(iid).c_str(), qiHr);
 	RETURN_HR(MF_E_UNSUPPORTED_SERVICE);
 }
 

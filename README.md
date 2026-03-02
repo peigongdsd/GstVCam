@@ -48,6 +48,7 @@ Values used:
 - `Height` (DWORD)
 - `FpsNumerator` (DWORD)
 - `FpsDenominator` (DWORD)
+- `LogEndpoint` (REG_SZ, example: `tcp://192.168.120.1:5555`)
 
 Example pipeline:
 
@@ -59,6 +60,13 @@ videotestsrc is-live=true ! videoconvert ! video/x-raw,format=NV12,width=1280,he
 
 - File log: `C:\vcamsample_trace.txt`
 - Includes source startup, pipeline state, bus errors/warnings, and frame fallback messages.
+
+## TCP kick lifecycle
+
+- The source opens a TCP connection to `LogEndpoint` before GStreamer pipeline startup.
+- If TCP connect fails, stream start fails (pipeline is not started).
+- The source closes the TCP connection immediately after pipeline stop/shutdown.
+- TCP is used for lifecycle coordination only; logs are not forwarded to this socket.
 
 ## Troubleshooting
 
