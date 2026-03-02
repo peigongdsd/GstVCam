@@ -59,6 +59,7 @@ private:
 	GUID _format;
 	uint32_t _requestCount = 0;
 	ULONGLONG _lastRequestTraceTick = 0;
+	uint64_t _lastDeliveredFrameId = 0;
 	wil::com_ptr_nothrow<IMFStreamDescriptor> _descriptor;
 	wil::com_ptr_nothrow<IMFMediaEventQueue> _queue;
 	wil::com_ptr_nothrow<IMFMediaSource> _source;

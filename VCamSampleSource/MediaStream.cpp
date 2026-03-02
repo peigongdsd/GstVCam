@@ -93,6 +93,7 @@ HRESULT MediaStream::Start(IMFMediaType* type)
 	RETURN_IF_FAILED(_allocator->InitializeSampleAllocator(10, type));
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr));
 	_state = MF_STREAM_STATE_RUNNING;
+	_lastDeliveredFrameId = 0;
 	return S_OK;
 }
 
@@ -111,6 +112,7 @@ HRESULT MediaStream::Stop()
 	TcpKickDisconnect();
 	RETURN_IF_FAILED(_queue->QueueEventParamVar(MEStreamStopped, GUID_NULL, S_OK, nullptr));
 	_state = MF_STREAM_STATE_STOPPED;
+	_lastDeliveredFrameId = 0;
 	return S_OK;
 }
 
@@ -152,6 +154,7 @@ void MediaStream::Shutdown()
 	_source.reset();
 	_attributes.reset();
 	_state = MF_STREAM_STATE_STOPPED;
+	_lastDeliveredFrameId = 0;
 }
 
 // IMFMediaEventGenerator
@@ -229,6 +232,7 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	wil::com_ptr_nothrow<IMFVideoSampleAllocatorEx> allocator;
 	wil::com_ptr_nothrow<IMFMediaEventQueue> queue;
 	LONGLONG frameDuration = 0;
+	uint64_t lastDeliveredFrameId = 0;
 	{
 		// Snapshot mutable state, then release the stream lock for heavy per-frame work.
 		winrt::slim_lock_guard lock(_lock);
@@ -237,6 +241,14 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		allocator = _allocator;
 		queue = _queue;
 		frameDuration = _frameDuration;
+		lastDeliveredFrameId = _lastDeliveredFrameId;
+	}
+
+	uint64_t latestFrameId = 0;
+	if (!_pipelineSource.HasNewFrameSince(lastDeliveredFrameId, &latestFrameId))
+	{
+		std::this_thread::yield();
+		return S_OK;
 	}
 
 	wil::com_ptr_nothrow<IMFSample> sample;
@@ -254,8 +266,14 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 	LONG pitch = 0;
 	DWORD length = 0;
 	RETURN_IF_FAILED(buffer2D->Lock2DSize(MF2DBuffer_LockFlags_Write, &scanline, &pitch, &start, &length));
-	const auto copyHr = _pipelineSource.CopyLatestFrameTo(scanline, pitch, length);
+	uint64_t copiedFrameId = 0;
+	const auto copyHr = _pipelineSource.CopyLatestFrameTo(scanline, pitch, length, lastDeliveredFrameId, &copiedFrameId);
 	buffer2D->Unlock2D();
+	if (copyHr == S_FALSE)
+	{
+		std::this_thread::yield();
+		return S_OK;
+	}
 	RETURN_IF_FAILED(copyHr);
 
 	if (pToken)
@@ -272,11 +290,13 @@ STDMETHODIMP MediaStream::RequestSample(IUnknown* pToken)
 		{
 			_lastRequestTraceTick = now;
 			WINTRACE(
-				L"MediaStream::RequestSample count:%u pitch:%ld length:%u",
+				L"MediaStream::RequestSample count:%u pitch:%ld length:%u frameId:%llu",
 				_requestCount,
 				pitch,
-				length);
+				length,
+				copiedFrameId);
 		}
+		_lastDeliveredFrameId = copiedFrameId;
 	}
 	return S_OK;
 }

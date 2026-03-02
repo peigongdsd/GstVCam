@@ -398,6 +398,7 @@ void GstPipelineSource::ResetPipelineObjects()
 			_latestSample = nullptr;
 		}
 		_hasFrame = false;
+		_latestFrameId = 0;
 	}
 
 	if (_bus)
@@ -532,56 +533,76 @@ HRESULT GstPipelineSource::StoreSample(GstSample* sample)
 		}
 		_latestSample = gst_sample_ref(sample);
 		_hasFrame = true;
+		_latestFrameId++;
 	}
 	return S_OK;
 }
 
-HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destinationStride, DWORD destinationLength)
+bool GstPipelineSource::HasNewFrameSince(uint64_t lastDeliveredFrameId, uint64_t* outLatestFrameId)
+{
+	if (outLatestFrameId)
+	{
+		*outLatestFrameId = 0;
+	}
+
+	std::lock_guard<std::mutex> lock(_frameLock);
+	if (!_hasFrame || !_latestSample)
+	{
+		return false;
+	}
+	if (_latestFrameId <= lastDeliveredFrameId)
+	{
+		return false;
+	}
+	if (outLatestFrameId)
+	{
+		*outLatestFrameId = _latestFrameId;
+	}
+	return true;
+}
+
+HRESULT GstPipelineSource::CopyLatestFrameTo(BYTE* destination, LONG destinationStride, DWORD destinationLength, uint64_t minimumFrameIdExclusive, uint64_t* outCopiedFrameId)
 {
 	RETURN_HR_IF_NULL(E_POINTER, destination);
 	RETURN_HR_IF(E_INVALIDARG, destinationStride <= 0);
 	RETURN_HR_IF(E_INVALIDARG, destinationStride < static_cast<LONG>(_config.width));
+	RETURN_HR_IF_NULL(E_POINTER, outCopiedFrameId);
+	*outCopiedFrameId = 0;
 
 	const auto requiredLength = static_cast<size_t>(destinationStride) * _config.height * 3 / 2;
 	RETURN_HR_IF(E_BOUNDS, destinationLength < requiredLength);
 
 	GstSample* sample = nullptr;
 	bool hasFrame = false;
+	uint64_t frameId = 0;
 	{
 		std::lock_guard<std::mutex> lock(_frameLock);
 		hasFrame = _hasFrame;
 		if (_hasFrame && _latestSample)
 		{
+			frameId = _latestFrameId;
 			sample = gst_sample_ref(_latestSample);
 		}
 	}
 
-	if (!sample)
+	if (!sample || frameId <= minimumFrameIdExclusive)
 	{
 		const auto now = GetTickCount64();
 		if (now - _lastFallbackLogTick.load() >= kFallbackLogIntervalMs)
 		{
 			_lastFallbackLogTick.store(now);
 			WINTRACE(
-				L"Using fallback black frame hasFrame:%u sample:%p stride:%ld length:%u",
+				L"No new frame available hasFrame:%u sample:%p frameId:%llu lastDelivered:%llu",
 				hasFrame ? 1 : 0,
 				sample,
-				destinationStride,
-				destinationLength);
+				frameId,
+				minimumFrameIdExclusive);
 		}
-
-		// Black NV12 frame.
-		for (UINT row = 0; row < _config.height; row++)
+		if (sample)
 		{
-			memset(destination + static_cast<size_t>(row) * destinationStride, 16, _config.width);
+			gst_sample_unref(sample);
 		}
-
-		BYTE* uv = destination + static_cast<size_t>(destinationStride) * _config.height;
-		for (UINT row = 0; row < _config.height / 2; row++)
-		{
-			memset(uv + static_cast<size_t>(row) * destinationStride, 128, _config.width);
-		}
-		return S_OK;
+		return S_FALSE;
 	}
 
 	if (!_firstCopyLogged.exchange(true))
@@ -657,6 +678,10 @@ Cleanup:
 		gst_video_frame_unmap(&frame);
 	}
 	gst_sample_unref(sample);
+	if (SUCCEEDED(hr))
+	{
+		*outCopiedFrameId = frameId;
+	}
 	return hr;
 }
 

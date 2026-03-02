@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -27,7 +28,8 @@ public:
 
 	HRESULT Start(const VCamPipelineConfig& config);
 	void Stop();
-	HRESULT CopyLatestFrameTo(BYTE* destination, LONG destinationStride, DWORD destinationLength);
+	bool HasNewFrameSince(uint64_t lastDeliveredFrameId, uint64_t* outLatestFrameId);
+	HRESULT CopyLatestFrameTo(BYTE* destination, LONG destinationStride, DWORD destinationLength, uint64_t minimumFrameIdExclusive, uint64_t* outCopiedFrameId);
 
 private:
 	HRESULT EnsureGStreamerInitialized();
@@ -45,6 +47,7 @@ private:
 	std::mutex _frameLock;
 	GstSample* _latestSample = nullptr;
 	bool _hasFrame = false;
+	uint64_t _latestFrameId = 0;
 	std::atomic<bool> _formatMismatchLogged = false;
 	std::atomic<bool> _firstFrameLogged = false;
 	std::atomic<bool> _firstCopyLogged = false;
