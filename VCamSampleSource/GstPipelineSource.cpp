@@ -5,7 +5,6 @@
 #include <algorithm>
 #include <cwctype>
 #include <mutex>
-#include <vector>
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
@@ -120,76 +119,6 @@ namespace
 		gst_object_unref(feature);
 	}
 
-	std::vector<std::wstring> GetShm2PluginCandidates()
-	{
-		std::vector<std::wstring> candidates;
-		const auto explicitPath = ReadEnvVar(L"GSTVCAM_SHM2_PLUGIN_PATH");
-		if (!explicitPath.empty())
-		{
-			candidates.push_back(explicitPath);
-		}
-
-		candidates.push_back(L"C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64\\lib\\gstreamer-1.0\\gstshm2.dll");
-		return candidates;
-	}
-
-	void ProbePluginLoadByFilePath(const std::wstring& pluginPath)
-	{
-		if (pluginPath.empty())
-		{
-			return;
-		}
-
-		const DWORD attrs = GetFileAttributesW(pluginPath.c_str());
-		if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
-		{
-			WINTRACE(L"Plugin probe path not found: %s", pluginPath.c_str());
-			return;
-		}
-
-		GError* error = nullptr;
-		const auto pluginPathA = to_string(pluginPath);
-		GstPlugin* plugin = gst_plugin_load_file(pluginPathA.c_str(), &error);
-		if (!plugin)
-		{
-			if (error)
-			{
-				WINTRACE(
-					L"Plugin load failed path:%s domain:%u code:%d message:%s",
-					pluginPath.c_str(),
-					error->domain,
-					error->code,
-					to_wstring(error->message).c_str());
-				g_clear_error(&error);
-			}
-			else
-			{
-				WINTRACE(L"Plugin load failed path:%s with unknown error", pluginPath.c_str());
-			}
-			return;
-		}
-
-		const gchar* name = gst_plugin_get_name(plugin);
-		const gchar* desc = gst_plugin_get_description(plugin);
-		const gchar* version = gst_plugin_get_version(plugin);
-		WINTRACE(
-			L"Plugin load success path:%s name:%S version:%S desc:%S",
-			pluginPath.c_str(),
-			name ? name : "",
-			version ? version : "",
-			desc ? desc : "");
-		gst_object_unref(plugin);
-	}
-
-	void ProbeShm2PluginLoad()
-	{
-		const auto candidates = GetShm2PluginCandidates();
-		for (const auto& path : candidates)
-		{
-			ProbePluginLoadByFilePath(path);
-		}
-	}
-
 	bool ContainsCaseInsensitive(const std::wstring& value, const std::wstring& token)
 	{
 		std::wstring lowerValue = value;
@@ -244,7 +173,6 @@ HRESULT GstPipelineSource::EnsureGStreamerInitialized()
 				minor,
 				micro,
 				nano);
-			ProbeShm2PluginLoad();
 			LogElementFactoryAvailability("shm2src");
 			LogElementFactoryAvailability("shmsrc");
 			LogElementFactoryAvailability("appsink");
