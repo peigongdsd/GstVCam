@@ -16,4 +16,3 @@ void WinTraceFormat(UCHAR Level, ULONGLONG Keyword, PCSTR pszFormat, ...);
 #else
 #define WINTRACE __noop
 #endif
-#pragma once

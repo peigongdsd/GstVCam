@@ -58,7 +58,7 @@ videotestsrc is-live=true ! videoconvert ! video/x-raw,format=NV12,width=1280,he
 
 ## Logging
 
-- File log: `C:\vcamsample_trace.txt`
+- File log: `C:\gstvcam_trace.txt`
 - Includes source startup, pipeline state, bus errors/warnings, and frame fallback messages.
 
 ## TCP kick lifecycle

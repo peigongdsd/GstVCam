@@ -355,15 +355,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved)
 		WinTraceRegister();
 		WINTRACE(L"DllMain DLL_PROCESS_ATTACH '%s'", GetCommandLine());
 		DisableThreadLibraryCalls(hModule);
-
-		wil::SetResultLoggingCallback([](wil::FailureInfo const& failure) noexcept
-			{
-				wchar_t str[2048];
-				if (SUCCEEDED(wil::GetFailureLogString(str, _countof(str), failure)))
-				{
-					WinTrace(2, 0, str); // 2 => error
-				}
-			});
 		break;
 
 	case DLL_PROCESS_DETACH:

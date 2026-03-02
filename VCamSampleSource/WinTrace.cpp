@@ -1,159 +1,201 @@
 #include "pch.h"
 #include "Tools.h"
+#include "TcpKick.h"
+
 #include <mutex>
-#include <vector>
+#include <string>
 
-// we don't use OutputDebugString because it's 100% crap, truncating, slow, etc.
-// use WpfTraceSpy https://github.com/smourier/TraceSpy to see these traces (configure an ETW Provider with guid set to 964d4572-adb9-4f3a-8170-fcbecec27467)
-static GUID GUID_WinTraceProvider = { 0x964d4572,0xadb9,0x4f3a,{0x81,0x70,0xfc,0xbe,0xce,0xc2,0x74,0x67} };
-static constexpr PCWSTR kTraceFilePath = L"C:\\vcamsample_trace.txt";
-
-REGHANDLE _traceHandle = 0;
-
-static void AppendTraceToFile(PCWSTR text)
+namespace
 {
-	if (!text || !*text)
-		return;
+	static constexpr PCWSTR kTraceFilePath = L"C:\\gstvcam_trace.txt";
+	static std::mutex g_traceLock;
+	static bool g_traceEnabled = false;
 
-	static std::mutex s_fileLock;
-	std::lock_guard<std::mutex> guard(s_fileLock);
-
-	HANDLE file = CreateFileW(
-		kTraceFilePath,
-		FILE_APPEND_DATA,
-		FILE_SHARE_READ | FILE_SHARE_WRITE,
-		nullptr,
-		OPEN_ALWAYS,
-		FILE_ATTRIBUTE_NORMAL,
-		nullptr);
-	if (file == INVALID_HANDLE_VALUE)
-		return;
-
-	auto line = std::format(L"{}\r\n", text);
-	const auto utf8Bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, nullptr, 0, nullptr, nullptr);
-	if (utf8Bytes > 1)
+	std::wstring TrimLineEnding(std::wstring text)
 	{
-		std::vector<char> buffer(static_cast<size_t>(utf8Bytes));
-		if (WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, buffer.data(), utf8Bytes, nullptr, nullptr) > 0)
+		while (!text.empty() && (text.back() == L'\r' || text.back() == L'\n'))
 		{
-			DWORD written = 0;
-			WriteFile(file, buffer.data(), static_cast<DWORD>(utf8Bytes - 1), &written, nullptr);
+			text.pop_back();
 		}
+		return text;
 	}
 
-	CloseHandle(file);
-}
-
-static void AppendTraceToConsole(PCWSTR text)
-{
-	if (!text || !*text)
-		return;
-
-	HANDLE handle = GetStdHandle(STD_ERROR_HANDLE);
-	if (!handle || handle == INVALID_HANDLE_VALUE)
+	std::wstring BuildTimestamp()
 	{
-		handle = GetStdHandle(STD_OUTPUT_HANDLE);
+		SYSTEMTIME st{};
+		GetLocalTime(&st);
+		return std::format(
+			L"{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}",
+			st.wYear,
+			st.wMonth,
+			st.wDay,
+			st.wHour,
+			st.wMinute,
+			st.wSecond,
+			st.wMilliseconds);
 	}
-	if (!handle || handle == INVALID_HANDLE_VALUE)
-		return;
 
-	auto line = std::format(L"{}\r\n", text);
-
-	DWORD mode = 0;
-	if (GetConsoleMode(handle, &mode))
+	void WriteUtf8LineToFileAndFlush(const std::string& utf8Line)
 	{
+		HANDLE file = CreateFileW(
+			kTraceFilePath,
+			FILE_APPEND_DATA,
+			FILE_SHARE_READ | FILE_SHARE_WRITE,
+			nullptr,
+			OPEN_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL,
+			nullptr);
+		if (file == INVALID_HANDLE_VALUE)
+		{
+			return;
+		}
+
 		DWORD written = 0;
-		WriteConsoleW(handle, line.c_str(), static_cast<DWORD>(line.size()), &written, nullptr);
-		return;
+		WriteFile(file, utf8Line.data(), static_cast<DWORD>(utf8Line.size()), &written, nullptr);
+		FlushFileBuffers(file);
+		CloseHandle(file);
 	}
 
-	const auto utf8Bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, nullptr, 0, nullptr, nullptr);
-	if (utf8Bytes > 1)
+	void EmitLine(const std::wstring& rawMessage)
 	{
-		std::vector<char> buffer(static_cast<size_t>(utf8Bytes));
-		if (WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, buffer.data(), utf8Bytes, nullptr, nullptr) > 0)
+		auto msg = TrimLineEnding(rawMessage);
+		auto line = std::format(L"[{}]{}", BuildTimestamp(), msg);
+		const auto utf8Bytes = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, nullptr, 0, nullptr, nullptr);
+		if (utf8Bytes <= 1)
 		{
-			DWORD written = 0;
-			WriteFile(handle, buffer.data(), static_cast<DWORD>(utf8Bytes - 1), &written, nullptr);
+			return;
 		}
+
+		std::string utf8(static_cast<size_t>(utf8Bytes), '\0');
+		if (WideCharToMultiByte(CP_UTF8, 0, line.c_str(), -1, utf8.data(), utf8Bytes, nullptr, nullptr) <= 0)
+		{
+			return;
+		}
+		utf8.pop_back(); // drop terminal null
+		utf8 += "\r\n";
+
+		std::lock_guard<std::mutex> lock(g_traceLock);
+		WriteUtf8LineToFileAndFlush(utf8);
+		(void)TcpKickSendLogUtf8(utf8.data(), utf8.size());
 	}
 }
 
 HRESULT GetTraceId(GUID* pGuid)
 {
 	if (!pGuid)
+	{
 		return E_INVALIDARG;
+	}
 
-	*pGuid = GUID_WinTraceProvider;
+	*pGuid = GUID_NULL;
 	return S_OK;
 }
 
 ULONG WinTraceRegister()
 {
-	return EventRegister(&GUID_WinTraceProvider, nullptr, nullptr, &_traceHandle);
+	std::lock_guard<std::mutex> lock(g_traceLock);
+	g_traceEnabled = true;
+	return ERROR_SUCCESS;
 }
 
 void WinTraceUnregister()
 {
-	auto h = _traceHandle;
-	if (h)
-	{
-		_traceHandle = 0;
-		EventUnregister(h);
-	}
+	std::lock_guard<std::mutex> lock(g_traceLock);
+	g_traceEnabled = false;
 }
 
 void WinTraceFormat(UCHAR level, ULONGLONG keyword, PCWSTR format, ...)
 {
-	if (!_traceHandle)
-		return;
+	UNREFERENCED_PARAMETER(level);
+	UNREFERENCED_PARAMETER(keyword);
 
-	WCHAR szTrace[2048];
+	if (!format)
+	{
+		return;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_traceLock);
+		if (!g_traceEnabled)
+		{
+			return;
+		}
+	}
+
+	WCHAR buffer[2048]{};
 	va_list args;
 	va_start(args, format);
-	// add '00000000:' before all traces
-	StringCchPrintf(szTrace, (size_t)(9 + 1), L"%08X:", GetCurrentThreadId());
-	StringCchVPrintfW(((LPWSTR)szTrace) + 9, _countof(szTrace) - 10, format, args);
+	StringCchVPrintfW(buffer, _countof(buffer), format, args);
 	va_end(args);
-	EventWriteString(_traceHandle, level, keyword, szTrace);
-	AppendTraceToFile(szTrace);
-	AppendTraceToConsole(szTrace);
+
+	EmitLine(buffer);
 }
 
 void WinTraceFormat(UCHAR level, ULONGLONG keyword, PCSTR format, ...)
 {
-	if (!_traceHandle)
-		return;
+	UNREFERENCED_PARAMETER(level);
+	UNREFERENCED_PARAMETER(keyword);
 
-	CHAR szTrace[2048];
+	if (!format)
+	{
+		return;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_traceLock);
+		if (!g_traceEnabled)
+		{
+			return;
+		}
+	}
+
+	CHAR buffer[2048]{};
 	va_list args;
 	va_start(args, format);
-	StringCchPrintfA(szTrace, (size_t)(9 + 1), "%08X:", GetCurrentThreadId());
-	StringCchVPrintfA(((LPSTR)szTrace) + 9, _countof(szTrace) - 10, format, args);
+	StringCchVPrintfA(buffer, _countof(buffer), format, args);
 	va_end(args);
-	auto ws = to_wstring(szTrace);
-	EventWriteString(_traceHandle, level, keyword, ws.c_str());
-	AppendTraceToFile(ws.c_str());
-	AppendTraceToConsole(ws.c_str());
-}
 
-void WinTrace(UCHAR level, ULONGLONG keyword, PCSTR string)
-{
-	if (!_traceHandle)
-		return;
-
-	auto ws = to_wstring(string);
-	EventWriteString(_traceHandle, level, keyword, ws.c_str());
-	AppendTraceToFile(ws.c_str());
-	AppendTraceToConsole(ws.c_str());
+	EmitLine(to_wstring(buffer));
 }
 
 void WinTrace(UCHAR level, ULONGLONG keyword, PCWSTR string)
 {
-	if (!_traceHandle)
-		return;
+	UNREFERENCED_PARAMETER(level);
+	UNREFERENCED_PARAMETER(keyword);
 
-	EventWriteString(_traceHandle, level, keyword, string);
-	AppendTraceToFile(string);
-	AppendTraceToConsole(string);
+	if (!string)
+	{
+		return;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_traceLock);
+		if (!g_traceEnabled)
+		{
+			return;
+		}
+	}
+
+	EmitLine(string);
+}
+
+void WinTrace(UCHAR level, ULONGLONG keyword, PCSTR string)
+{
+	UNREFERENCED_PARAMETER(level);
+	UNREFERENCED_PARAMETER(keyword);
+
+	if (!string)
+	{
+		return;
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_traceLock);
+		if (!g_traceEnabled)
+		{
+			return;
+		}
+	}
+
+	EmitLine(to_wstring(string));
 }

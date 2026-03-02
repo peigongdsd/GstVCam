@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <mutex>
+#include <vector>
 
 #include <gst/gst.h>
 #include <gst/app/gstappsink.h>
@@ -16,6 +17,178 @@ namespace
 	HRESULT g_gstInitHr = E_FAIL;
 	constexpr ULONGLONG kNoSampleLogIntervalMs = 2000;
 	constexpr ULONGLONG kFallbackLogIntervalMs = 2000;
+
+	std::wstring ReadEnvVar(PCWSTR name)
+	{
+		if (!name || !*name)
+		{
+			return {};
+		}
+
+		const DWORD required = GetEnvironmentVariableW(name, nullptr, 0);
+		if (required == 0)
+		{
+			return {};
+		}
+
+		std::wstring value;
+		value.resize(required - 1);
+		if (GetEnvironmentVariableW(name, value.data(), required) == 0)
+		{
+			return {};
+		}
+		return value;
+	}
+
+	std::wstring TruncateForLog(const std::wstring& text, size_t maxChars)
+	{
+		if (text.size() <= maxChars)
+		{
+			return text;
+		}
+		return text.substr(0, maxChars) + L"...";
+	}
+
+	void LogProcessContext()
+	{
+		wchar_t exePath[MAX_PATH]{};
+		DWORD exeLen = GetModuleFileNameW(nullptr, exePath, _countof(exePath));
+		if (exeLen == 0 || exeLen >= _countof(exePath))
+		{
+			StringCchCopyW(exePath, _countof(exePath), L"<unknown>");
+		}
+
+		wchar_t userName[256]{};
+		DWORD userLen = _countof(userName);
+		if (!GetUserNameW(userName, &userLen) || userName[0] == L'\0')
+		{
+			StringCchCopyW(userName, _countof(userName), L"<unknown>");
+		}
+
+		WINTRACE(
+			L"GStreamer runtime context pid:%u user:%s exe:%s",
+			GetCurrentProcessId(),
+			userName,
+			exePath);
+	}
+
+	void LogGstEnvironment()
+	{
+		const auto pluginPath10 = ReadEnvVar(L"GST_PLUGIN_PATH_1_0");
+		const auto pluginPath = ReadEnvVar(L"GST_PLUGIN_PATH");
+		const auto pluginSysPath10 = ReadEnvVar(L"GST_PLUGIN_SYSTEM_PATH_1_0");
+		const auto pluginSysPath = ReadEnvVar(L"GST_PLUGIN_SYSTEM_PATH");
+		const auto gstRegistry = ReadEnvVar(L"GST_REGISTRY");
+		const auto pathValue = ReadEnvVar(L"PATH");
+
+		WINTRACE(L"GST_PLUGIN_PATH_1_0=%s", pluginPath10.empty() ? L"<unset>" : TruncateForLog(pluginPath10, 1024).c_str());
+		WINTRACE(L"GST_PLUGIN_PATH=%s", pluginPath.empty() ? L"<unset>" : TruncateForLog(pluginPath, 1024).c_str());
+		WINTRACE(L"GST_PLUGIN_SYSTEM_PATH_1_0=%s", pluginSysPath10.empty() ? L"<unset>" : TruncateForLog(pluginSysPath10, 1024).c_str());
+		WINTRACE(L"GST_PLUGIN_SYSTEM_PATH=%s", pluginSysPath.empty() ? L"<unset>" : TruncateForLog(pluginSysPath, 1024).c_str());
+		WINTRACE(L"GST_REGISTRY=%s", gstRegistry.empty() ? L"<unset>" : TruncateForLog(gstRegistry, 1024).c_str());
+		WINTRACE(L"PATH length:%zu head:%s", pathValue.size(), pathValue.empty() ? L"<unset>" : TruncateForLog(pathValue, 512).c_str());
+	}
+
+	void LogElementFactoryAvailability(const char* elementName)
+	{
+		if (!elementName || !*elementName)
+		{
+			return;
+		}
+
+		auto registry = gst_registry_get();
+		if (!registry)
+		{
+			WINTRACE(L"GStreamer registry unavailable while probing '%S'", elementName);
+			return;
+		}
+
+		GstPluginFeature* feature = gst_registry_find_feature(registry, elementName, GST_TYPE_ELEMENT_FACTORY);
+		if (!feature)
+		{
+			WINTRACE(L"GStreamer element factory '%S' not found in registry", elementName);
+			return;
+		}
+
+		const gchar* pluginName = gst_plugin_feature_get_plugin_name(feature);
+		const guint rank = gst_plugin_feature_get_rank(feature);
+		WINTRACE(
+			L"GStreamer element factory '%S' found plugin:%S rank:%u",
+			elementName,
+			pluginName ? pluginName : "",
+			rank);
+		gst_object_unref(feature);
+	}
+
+	std::vector<std::wstring> GetShm2PluginCandidates()
+	{
+		std::vector<std::wstring> candidates;
+		const auto explicitPath = ReadEnvVar(L"GSTVCAM_SHM2_PLUGIN_PATH");
+		if (!explicitPath.empty())
+		{
+			candidates.push_back(explicitPath);
+		}
+
+		candidates.push_back(L"C:\\Program Files\\gstreamer\\1.0\\msvc_x86_64\\lib\\gstreamer-1.0\\gstshm2.dll");
+		return candidates;
+	}
+
+	void ProbePluginLoadByFilePath(const std::wstring& pluginPath)
+	{
+		if (pluginPath.empty())
+		{
+			return;
+		}
+
+		const DWORD attrs = GetFileAttributesW(pluginPath.c_str());
+		if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_DIRECTORY))
+		{
+			WINTRACE(L"Plugin probe path not found: %s", pluginPath.c_str());
+			return;
+		}
+
+		GError* error = nullptr;
+		const auto pluginPathA = to_string(pluginPath);
+		GstPlugin* plugin = gst_plugin_load_file(pluginPathA.c_str(), &error);
+		if (!plugin)
+		{
+			if (error)
+			{
+				WINTRACE(
+					L"Plugin load failed path:%s domain:%u code:%d message:%s",
+					pluginPath.c_str(),
+					error->domain,
+					error->code,
+					to_wstring(error->message).c_str());
+				g_clear_error(&error);
+			}
+			else
+			{
+				WINTRACE(L"Plugin load failed path:%s with unknown error", pluginPath.c_str());
+			}
+			return;
+		}
+
+		const gchar* name = gst_plugin_get_name(plugin);
+		const gchar* desc = gst_plugin_get_description(plugin);
+		const gchar* version = gst_plugin_get_version(plugin);
+		WINTRACE(
+			L"Plugin load success path:%s name:%S version:%S desc:%S",
+			pluginPath.c_str(),
+			name ? name : "",
+			version ? version : "",
+			desc ? desc : "");
+		gst_object_unref(plugin);
+	}
+
+	void ProbeShm2PluginLoad()
+	{
+		const auto candidates = GetShm2PluginCandidates();
+		for (const auto& path : candidates)
+		{
+			ProbePluginLoadByFilePath(path);
+		}
+	}
 
 	bool ContainsCaseInsensitive(const std::wstring& value, const std::wstring& token)
 	{
@@ -47,6 +220,8 @@ HRESULT GstPipelineSource::EnsureGStreamerInitialized()
 {
 	std::call_once(g_gstInitOnce, []()
 		{
+			LogProcessContext();
+			LogGstEnvironment();
 			GError* error = nullptr;
 			if (!gst_init_check(nullptr, nullptr, &error))
 			{
@@ -59,6 +234,21 @@ HRESULT GstPipelineSource::EnsureGStreamerInitialized()
 				return;
 			}
 
+			guint major = 0;
+			guint minor = 0;
+			guint micro = 0;
+			guint nano = 0;
+			gst_version(&major, &minor, &micro, &nano);
+			WINTRACE(
+				L"GStreamer initialized version:%u.%u.%u.%u",
+				major,
+				minor,
+				micro,
+				nano);
+			ProbeShm2PluginLoad();
+			LogElementFactoryAvailability("shm2src");
+			LogElementFactoryAvailability("shmsrc");
+			LogElementFactoryAvailability("appsink");
 			g_gstInitHr = S_OK;
 		});
 
@@ -98,7 +288,13 @@ HRESULT GstPipelineSource::Start(const VCamPipelineConfig& config)
 	GstElement* pipeline = gst_parse_launch(pipelineA.c_str(), &parseError);
 	if (parseError)
 	{
-		WINTRACE(L"GStreamer parse warning/error detail: %s", to_wstring(parseError->message).c_str());
+		WINTRACE(
+			L"GStreamer parse warning/error detail domain:%u code:%d message:%s",
+			parseError->domain,
+			parseError->code,
+			to_wstring(parseError->message).c_str());
+		LogElementFactoryAvailability("shm2src");
+		LogElementFactoryAvailability("shmsrc");
 		g_clear_error(&parseError);
 	}
 	RETURN_HR_IF_NULL_MSG(E_INVALIDARG, pipeline, "Invalid GStreamer pipeline");

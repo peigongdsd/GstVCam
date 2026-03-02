@@ -1,6 +1,7 @@
 #include "pch.h"
 #include "Tools.h"
 
+#include <climits>
 #include <mutex>
 #include <string>
 
@@ -10,7 +11,7 @@ namespace
 {
 	constexpr PCWSTR kConfigPath = L"SOFTWARE\\VCamSample\\GStreamer";
 	constexpr PCWSTR kLogEndpointValueName = L"LogEndpoint";
-	constexpr PCWSTR kDefaultLogEndpoint = L"tcp://192.168.120.1:5555";
+	constexpr PCWSTR kDefaultLogEndpoint = L"tcp://192.168.122.1:5555";
 
 	std::mutex g_lock;
 	SOCKET g_socket = INVALID_SOCKET;
@@ -140,4 +141,33 @@ void TcpKickDisconnect()
 		WSACleanup();
 		g_wsaInitialized = false;
 	}
+}
+
+bool TcpKickSendLogUtf8(const char* data, size_t size)
+{
+	if (!data || size == 0)
+	{
+		return false;
+	}
+
+	std::lock_guard<std::mutex> guard(g_lock);
+	if (g_socket == INVALID_SOCKET)
+	{
+		return false;
+	}
+
+	size_t totalSent = 0;
+	while (totalSent < size)
+	{
+		const auto remaining = size - totalSent;
+		const auto maxInt = static_cast<size_t>(INT_MAX);
+		const auto chunk = static_cast<int>((remaining > maxInt) ? maxInt : remaining);
+		const auto sent = send(g_socket, data + totalSent, chunk, 0);
+		if (sent <= 0)
+		{
+			return false;
+		}
+		totalSent += static_cast<size_t>(sent);
+	}
+	return true;
 }
