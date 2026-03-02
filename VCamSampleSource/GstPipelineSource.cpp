@@ -202,8 +202,7 @@ namespace
 	std::wstring BuildDefaultPipeline(const VCamPipelineConfig& config)
 	{
 		return std::format(
-			//L"videotestsrc is-live=true pattern=smpte ! video/x-raw,format=NV12,width={},height={},framerate={}/{} ! appsink name=vcamsink",
-			L"shm2src shm-path=ivshmem://PCI\\VEN_1AF4&DEV_1110&SUBSYS_11001AF4&REV_01\\3&11583659&0&88 is-live=true latest-only=true ! video/x-raw,format=NV12,width={},height={},framerate={}/{} ! appsink name=vcamsink",
+			L"videotestsrc is-live=true pattern=smpte ! video/x-raw,format=NV12,width={},height={},framerate={}/{} ! appsink name=vcamsink",
 			config.width,
 			config.height,
 			config.fpsNumerator,
